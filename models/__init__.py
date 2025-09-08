@@ -11,7 +11,10 @@ Các kiến trúc hỗ trợ:
 5. 'dcgan'         : DCGAN generator tối giản làm image prior.
 6. 'identity'      : Trả về nn.Sequential() rỗng (debug/baseline, yêu cầu input_depth==n_channels).
 
-output_act (global): None|'sigmoid'|'tanh' ưu tiên override need_sigmoid.
+API bổ sung:
+- output_act hỗ trợ: None | 'sigmoid' | 'tanh' | 'identity' (identity = không activation cuối).
+- count_params, model_summary, smoke_test trong models.utils.
+- Kiểm tra lỗi rõ ràng: dcgan yêu cầu num_ups>=3; identity kiểm tra kích thước.
 """
 
 from .skip import skip
@@ -20,8 +23,19 @@ from .resnet import ResNet
 from .unet import UNet
 from .dcgan import dcgan
 import torch.nn as nn
+from .utils import count_params, model_summary, smoke_test
 
-__all__ = ["get_net", "skip", "get_texture_nets", "ResNet", "UNet", "dcgan"]
+__all__ = [
+    "get_net",
+    "skip",
+    "get_texture_nets",
+    "ResNet",
+    "UNet",
+    "dcgan",
+    "count_params",
+    "model_summary",
+    "smoke_test",
+]
 
 
 def get_net(
@@ -45,10 +59,15 @@ def get_net(
     dcgan_ups=4,
     dcgan_convT=True,
 ):
-    """Trả về instance mạng theo ``NET_TYPE``.
-
-    output_act: None|'sigmoid'|'tanh' (override need_sigmoid nếu cung cấp)
-    """
+    # Chuẩn hóa pad
+    if pad not in {"reflection", "zero", "replication"}:
+        raise ValueError(f"Unsupported pad: {pad}")
+    # Đồng bộ output_act với need_sigmoid nếu chưa cung cấp
+    if need_sigmoid and output_act is None:
+        output_act = "sigmoid"
+    if output_act not in {None, "sigmoid", "tanh", "identity"}:
+        raise ValueError(f"Unsupported output_act: {output_act}")
+    # Khởi tạo mạng theo kiến trúc yêu cầu
     if NET_TYPE == "ResNet":
         # ResNet: chuỗi các residual blocks. Ổn định gradient, phù hợp khi không cần
         # kiến trúc encoder–decoder đa tỉ lệ nhưng vẫn muốn biểu diễn sâu vừa phải.
@@ -88,7 +107,13 @@ def get_net(
     elif NET_TYPE == "texture_nets":
         # Texture nets: multi-scale feature synthesis. Thường dùng cho bài toán tạo / giữ pattern.
         net = get_texture_nets(
-            inp=input_depth, ratios=[32, 16, 8, 4, 2, 1], fill_noise=False, pad=pad
+            inp=input_depth,
+            ratios=[32, 16, 8, 4, 2, 1],
+            fill_noise=False,
+            pad=pad,
+            need_sigmoid=need_sigmoid,
+            output_channels=n_channels,
+            output_act=output_act,
         )
     elif NET_TYPE == "UNet":
         # UNet: kiến trúc đối xứng cổ điển. Cấu hình hiện tại chọn feature_scale=4 để
@@ -108,6 +133,8 @@ def get_net(
         )
     elif NET_TYPE == "dcgan":
         # DCGAN: mạng sinh DCGAN tối giản, chủ yếu dùng cho bài toán tạo ảnh.
+        if dcgan_ups < 3:
+            raise ValueError("dcgan: num_ups phải >= 3 để đảm bảo kích thước hợp lệ")
         net = dcgan(
             inp=input_depth,
             ndf=dcgan_ndf,
@@ -120,7 +147,10 @@ def get_net(
         )
     elif NET_TYPE == "identity":
         # Identity: dùng chủ yếu để debug pipeline hoặc làm baseline (không học gì).
-        assert input_depth == n_channels, "identity: input_depth phải bằng n_channels"
+        if input_depth != n_channels:
+            raise ValueError(
+                f"identity: yêu cầu input_depth==n_channels (got {input_depth}!={n_channels})"
+            )
         net = nn.Sequential()
     else:
         raise ValueError(f"Unknown NET_TYPE: {NET_TYPE}")
