@@ -33,15 +33,14 @@ normalization = nn.BatchNorm2d
 def conv(in_f, out_f, kernel_size, stride=1, bias=True, pad="zero"):
     """Conv helper với tùy chọn reflection padding nội bộ.
 
-    Ghi chú: padding tính toán để giữ spatial size.
+    Ghi chú: padding tính toán để giữ spatial size (ép kiểu int).
     """
+    pad_val = (kernel_size - 1) // 2  # đảm bảo int
     if pad == "zero":
-        return nn.Conv2d(
-            in_f, out_f, kernel_size, stride, padding=(kernel_size - 1) / 2, bias=bias
-        )
+        return nn.Conv2d(in_f, out_f, kernel_size, stride, padding=pad_val, bias=bias)
     elif pad == "reflection":
         layers = [
-            nn.ReflectionPad2d((kernel_size - 1) / 2),
+            nn.ReflectionPad2d(pad_val),
             nn.Conv2d(in_f, out_f, kernel_size, stride, padding=0, bias=bias),
         ]
         return nn.Sequential(*layers)
