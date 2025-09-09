@@ -1,5 +1,13 @@
-"""utils.visualization
-Định tính: visualize_comparison, make_grid_triplet.
+"""visualization.py
+=====================
+Định tính (Qualitative) cho đánh giá khôi phục ảnh.
+Cung cấp:
+- visualize_comparison: Vẽ 3 cột (Blur / Output / Ground Truth) nhanh, hỗ trợ lưu.
+- make_grid_triplet: Tạo grid tensor (torchvision) phục vụ logging (TensorBoard/WandB).
+
+Quy ước:
+- Ảnh đầu vào có thể là torch.Tensor (C,H,W) hoặc numpy (H,W,C) ở dải [0,1].
+- Nếu ảnh 1 kênh sẽ nhân lên 3 kênh khi hiển thị màu.
 """
 
 from typing import Optional
@@ -8,7 +16,7 @@ import torch
 
 try:
     import torchvision.utils as vutils
-except Exception:  # pragma: no cover
+except Exception:
     vutils = None
 
 __all__ = ["visualize_comparison", "make_grid_triplet"]
@@ -24,14 +32,30 @@ def visualize_comparison(
     cmap=None,
     show=True,
 ):
+    """So sánh trực quan 3 ảnh: Ảnh mờ (Blur), Ảnh phục hồi (Restored), Ảnh gốc (Sharp).
+
+    Args:
+        blur: Ảnh đầu vào bị mờ.
+        restored: Ảnh đầu ra từ mô hình phục hồi.
+        sharp: Ảnh gốc không bị mờ.
+        titles: Tiêu đề cho từng ảnh (mặc định là ("Input (Blur)", "Output (Model)", "Ground Truth")).
+        figsize: Kích thước của hình vẽ.
+        save_path: Đường dẫn để lưu hình vẽ. Nếu None, hình sẽ không được lưu.
+        cmap: Bảng màu để hiển thị ảnh. Mặc định là None.
+        show: Nếu True, hiển thị hình vẽ. Nếu False, đóng hình lại.
+
+    Returns:
+        fig: Đối tượng hình vẽ từ matplotlib.
+    """
     try:
         import matplotlib.pyplot as plt
-    except Exception as e:  # pragma: no cover
+    except Exception as e:
         raise ImportError(
             "Cần matplotlib để visualize. Cài: pip install matplotlib"
         ) from e
 
     def to_np(img):
+        """Chuyển đổi ảnh từ định dạng tensor hoặc numpy về định dạng numpy."""
         if isinstance(img, torch.Tensor):
             x = img.detach().cpu()
             if x.ndim == 4:
@@ -63,10 +87,22 @@ def visualize_comparison(
 
 
 def make_grid_triplet(blur, restored, sharp, pad_value=0.5):
+    """Tạo grid cho 3 ảnh: Ảnh mờ (Blur), Ảnh phục hồi (Restored), Ảnh gốc (Sharp).
+
+    Args:
+        blur: Ảnh đầu vào bị mờ.
+        restored: Ảnh đầu ra từ mô hình phục hồi.
+        sharp: Ảnh gốc không bị mờ.
+        pad_value: Giá trị đệm cho các ô trong grid.
+
+    Returns:
+        grid: Tensor chứa grid của 3 ảnh đầu vào.
+    """
     if vutils is None:
         return None
 
     def norm_tensor(x):
+        """Chuẩn hóa tensor về khoảng [0, 1]."""
         if x.ndim == 4:
             x = x[0]
         if x.ndim == 2:

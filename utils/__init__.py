@@ -1,5 +1,9 @@
 """utils package
-Cung cấp các hàm định lượng (metrics) và định tính (visualization) cho đánh giá mô hình.
+=================
+Cung cấp hàm đánh giá:
+- metrics: PSNR, SSIM, evaluate_batch (định lượng).
+- visualization: visualize_comparison, make_grid_triplet (định tính).
+Import ví dụ: from utils import compute_psnr, visualize_comparison.
 """
 
 from .metrics import (

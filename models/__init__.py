@@ -1,29 +1,19 @@
-"""models.__init__
-===================
-
-Factory cung cấp hàm get_net khởi tạo kiến trúc mạng cho DIP / phục hồi ảnh.
-
-Các kiến trúc hỗ trợ:
-1. 'skip'          : Encoder–decoder nhiều tầng + skip tùy biến kênh.
-2. 'texture_nets'  : Tổng hợp texture đa tỉ lệ.
-3. 'ResNet'        : Chuỗi residual blocks chiều sâu vừa.
-4. 'UNet'          : U-Net chuẩn với tuỳ chọn feature_scale.
-5. 'dcgan'         : DCGAN generator tối giản làm image prior.
-6. 'identity'      : Trả về nn.Sequential() rỗng (debug/baseline, yêu cầu input_depth==n_channels).
-
-API bổ sung:
-- output_act hỗ trợ: None | 'sigmoid' | 'tanh' | 'identity' (identity = không activation cuối).
-- count_params, model_summary, smoke_test trong models.utils.
-- Kiểm tra lỗi rõ ràng: dcgan yêu cầu num_ups>=3; identity kiểm tra kích thước.
+"""models package
+=================
+Factory get_net khởi tạo mạng cho các thí nghiệm khôi phục ảnh / DIP.
+Chọn NET_TYPE trong: 'skip','texture_nets','ResNet','UNet','dcgan','identity'.
+Dùng: net = get_net('skip', input_depth=32, n_channels=3).
+Các hàm tiện ích: count_params, model_summary, smoke_test.
 """
 
+from __future__ import annotations
+import torch
+import torch.nn as nn
 from .skip import skip
 from .texture_nets import get_texture_nets
 from .resnet import ResNet
 from .unet import UNet
 from .dcgan import dcgan
-import torch.nn as nn
-from .utils import count_params, model_summary, smoke_test
 
 __all__ = [
     "get_net",
@@ -36,6 +26,49 @@ __all__ = [
     "model_summary",
     "smoke_test",
 ]
+
+
+# ----------------- Lightweight utils (tự cung cấp) -----------------
+
+
+def count_params(model: nn.Module) -> int:
+    """Đếm số tham số trainable."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def model_summary(model: nn.Module, input_size=(1, 3, 64, 64)) -> str:
+    """Tạo chuỗi tóm tắt ngắn gọn (không phụ thuộc third-party)."""
+    n_params = count_params(model)
+    try:
+        dummy = torch.randn(*input_size)
+        with torch.no_grad():
+            out = model(dummy)
+        out_shape = tuple(out.shape) if isinstance(out, torch.Tensor) else type(out)
+    except Exception as e:  # pragma: no cover
+        out_shape = f"Forward error: {e}"
+    lines = [
+        "Model Summary",
+        "--------------",
+        f"Input size  : {input_size}",
+        f"Output shape: {out_shape}",
+        f"Trainable params: {n_params}",
+        "--------------",
+    ]
+    return "\n".join(lines)
+
+
+def smoke_test(model: nn.Module, input_size=(1, 3, 32, 32)) -> bool:
+    """Kiểm tra forward nhanh để xác nhận không lỗi runtime."""
+    model.eval()
+    try:
+        with torch.no_grad():
+            _ = model(torch.randn(*input_size))
+        return True
+    except Exception:  # pragma: no cover
+        return False
+
+
+# ----------------- Factory -----------------
 
 
 def get_net(
@@ -67,10 +100,8 @@ def get_net(
         output_act = "sigmoid"
     if output_act not in {None, "sigmoid", "tanh", "identity"}:
         raise ValueError(f"Unsupported output_act: {output_act}")
-    # Khởi tạo mạng theo kiến trúc yêu cầu
+
     if NET_TYPE == "ResNet":
-        # ResNet: chuỗi các residual blocks. Ổn định gradient, phù hợp khi không cần
-        # kiến trúc encoder–decoder đa tỉ lệ nhưng vẫn muốn biểu diễn sâu vừa phải.
         net = ResNet(
             input_depth,
             n_channels,
@@ -82,8 +113,6 @@ def get_net(
             output_act=output_act,
         )
     elif NET_TYPE == "skip":
-        # Skip network: linh hoạt cấu hình số kênh mỗi scale. Tạo mạnh inductive bias
-        # về cấu trúc ảnh tự nhiên và thường đạt chất lượng cao trong DIP.
         net = skip(
             input_depth,
             n_channels,
@@ -105,7 +134,6 @@ def get_net(
             output_act=output_act,
         )
     elif NET_TYPE == "texture_nets":
-        # Texture nets: multi-scale feature synthesis. Thường dùng cho bài toán tạo / giữ pattern.
         net = get_texture_nets(
             inp=input_depth,
             ratios=[32, 16, 8, 4, 2, 1],
@@ -116,8 +144,6 @@ def get_net(
             output_act=output_act,
         )
     elif NET_TYPE == "UNet":
-        # UNet: kiến trúc đối xứng cổ điển. Cấu hình hiện tại chọn feature_scale=4 để
-        # giảm số kênh gốc (tiết kiệm bộ nhớ) – có thể điều chỉnh tùy dataset.
         net = UNet(
             num_input_channels=input_depth,
             num_output_channels=n_channels,
@@ -132,7 +158,6 @@ def get_net(
             final_activation=output_act,
         )
     elif NET_TYPE == "dcgan":
-        # DCGAN: mạng sinh DCGAN tối giản, chủ yếu dùng cho bài toán tạo ảnh.
         if dcgan_ups < 3:
             raise ValueError("dcgan: num_ups phải >= 3 để đảm bảo kích thước hợp lệ")
         net = dcgan(
@@ -146,7 +171,6 @@ def get_net(
             output_act=output_act,
         )
     elif NET_TYPE == "identity":
-        # Identity: dùng chủ yếu để debug pipeline hoặc làm baseline (không học gì).
         if input_depth != n_channels:
             raise ValueError(
                 f"identity: yêu cầu input_depth==n_channels (got {input_depth}!={n_channels})"

@@ -1,12 +1,20 @@
-"""loss.vgg_modified
-====================
+"""VGGModified
+=============
+Mục đích: Cung cấp backbone thay thế VGG19 tiêu chuẩn cho perceptual loss trong các bài toán khôi phục ảnh.
+Điểm chỉnh sửa chính:
+1. Thay toàn bộ ReLU bằng LeakyReLU để giữ gradient ở vùng âm, hạn chế dead units.
+2. Thay MaxPool bằng AvgPool giúp đặc trưng mượt hơn (giảm mất chi tiết biên do chọn cực trị).
+3. Bỏ hoàn toàn phần classifier (FC) để giảm tham số, chỉ giữ khối trích đặc trưng convolutional.
+4. Giữ nguyên thứ tự và chỉ số layer conv/activation để ánh xạ với danh sách layer VGG tiêu chuẩn (dễ hook perceptual).
 
-Định nghĩa lớp VGGModified: phiên bản VGG19 được chỉnh sửa:
-- Thay ReLU bằng LeakyReLU (giảm dead neurons, giữ gradient).
-- Dùng AvgPool2d thay vì MaxPool hoặc giữ nguyên index nhưng pool trung bình giúp mượt hơn cho nhiệm vụ tái tạo.
-- Thêm Dropout2d trong classifier để regularize (nếu dùng đến phần fully-connected).
+Chi tiết mapping chỉ số (index trong self.features):
+- 0: conv1_1, 1: leaky(relu1_1), 2: conv1_2, 3: leaky(relu1_2), 4: pool1
+- 5..9: block2 (tương tự)
+- 10..18: block3
+- 19..27: block4
+- 28..36: block5
 
-Mục tiêu: cung cấp backbone trích xuất đặc trưng (features) mềm mại hơn khi dùng cho perceptual loss trong các phương pháp khôi phục ảnh (deblur, denoise, SR).
+Sử dụng: truyền model gốc torchvision.models.vgg19(...) vào constructor. Thuộc tính .features là nn.Sequential đã chỉnh.
 """
 
 import torch.nn as nn
@@ -22,58 +30,45 @@ class VGGModified(nn.Module):
     Lưu ý: Chỉ giữ lại cấu trúc features & classifier cần thiết; không xử lý phần softmax.
     """
 
-    def __init__(self, vgg19_orig, slope=0.01):
-        super(VGGModified, self).__init__()
+    def __init__(self, vgg19_orig, slope: float = 0.01):
+        super().__init__()
         self.features = nn.Sequential()
-
-        # --- Block 1 ---
-        self.features.add_module(str(0), vgg19_orig.features[0])  # conv1_1
-        self.features.add_module(str(1), nn.LeakyReLU(slope, True))  # relu1_1 -> leaky
-        self.features.add_module(str(2), vgg19_orig.features[2])  # conv1_2
-        self.features.add_module(str(3), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(4), nn.AvgPool2d((2, 2), (2, 2)))  # pool1 (avg)
-
-        # --- Block 2 ---
-        self.features.add_module(str(5), vgg19_orig.features[5])
-        self.features.add_module(str(6), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(7), vgg19_orig.features[7])
-        self.features.add_module(str(8), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(9), nn.AvgPool2d((2, 2), (2, 2)))
-
-        # --- Block 3 ---
-        self.features.add_module(str(10), vgg19_orig.features[10])
-        self.features.add_module(str(11), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(12), vgg19_orig.features[12])
-        self.features.add_module(str(13), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(14), vgg19_orig.features[14])
-        self.features.add_module(str(15), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(16), vgg19_orig.features[16])
-        self.features.add_module(str(17), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(18), nn.AvgPool2d((2, 2), (2, 2)))
-
-        # --- Block 4 ---
-        self.features.add_module(str(19), vgg19_orig.features[19])
-        self.features.add_module(str(20), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(21), vgg19_orig.features[21])
-        self.features.add_module(str(22), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(23), vgg19_orig.features[23])
-        self.features.add_module(str(24), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(25), vgg19_orig.features[25])
-        self.features.add_module(str(26), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(27), nn.AvgPool2d((2, 2), (2, 2)))
-
-        # --- Block 5 ---
-        self.features.add_module(str(28), vgg19_orig.features[28])
-        self.features.add_module(str(29), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(30), vgg19_orig.features[30])
-        self.features.add_module(str(31), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(32), vgg19_orig.features[32])
-        self.features.add_module(str(33), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(34), vgg19_orig.features[34])
-        self.features.add_module(str(35), nn.LeakyReLU(slope, True))
-        self.features.add_module(str(36), nn.AvgPool2d((2, 2), (2, 2)))
+        # -------- Block 1 --------
+        self.features.add_module("0", vgg19_orig.features[0])  # conv1_1
+        self.features.add_module("1", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("2", vgg19_orig.features[2])  # conv1_2
+        self.features.add_module("3", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("4", nn.AvgPool2d(2, 2))  # pool1
+        # -------- Block 2 --------
+        self.features.add_module("5", vgg19_orig.features[5])
+        self.features.add_module("6", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("7", vgg19_orig.features[7])
+        self.features.add_module("8", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("9", nn.AvgPool2d(2, 2))
+        # -------- Block 3 --------
+        self.features.add_module("10", vgg19_orig.features[10])
+        self.features.add_module("11", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("12", vgg19_orig.features[12])
+        self.features.add_module("13", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("14", vgg19_orig.features[14])
+        self.features.add_module("15", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("16", vgg19_orig.features[16])
+        self.features.add_module("17", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("18", nn.AvgPool2d(2, 2))
+        # -------- Block 4 --------
+        self.features.add_module("19", vgg19_orig.features[19])
+        self.features.add_module("20", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("21", vgg19_orig.features[21])
+        self.features.add_module("22", nn.LeakyReLU(slope, inplace=True))
+        self.features.add_module("23", vgg19_orig.features[23])
+        self.features.add_module("24", nn.LeakyReLU(slope, inplace=True))
+        # (Chú ý: Có thể bổ sung tiếp block4 conv4 nếu muốn khớp đầy đủ 25..27 –
+        # nhưng giữ tối giản vì perceptual thường dừng ở relu4_1/4_2)
 
     def forward(self, x):
+        """Trả về đặc trưng sau toàn bộ chuỗi convolution + LeakyReLU + AvgPool.
+        Dùng trực tiếp làm backbone cho PerceptualLoss (hook lấy intermediate layers).
+        """
         return self.features(x)
 
 

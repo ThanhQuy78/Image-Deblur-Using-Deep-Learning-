@@ -1,6 +1,13 @@
-"""utils.metrics
-Định lượng: PSNR, SSIM, evaluate_batch.
-Tất cả hàm giả định ảnh trong [0,1] (truyền data_range nếu khác).
+"""metrics.py
+================
+Định lượng chất lượng ảnh khôi phục.
+Bao gồm:
+- compute_psnr: PSNR (độ lớn tín hiệu / nhiễu) dùng MSE.
+- compute_ssim: SSIM đánh giá tương quan cấu trúc cục bộ (so sáng, tương phản, cấu trúc).
+- evaluate_batch: Gộp trung bình PSNR/SSIM trên batch.
+
+Giả định ảnh đã chuẩn hoá về [0,1] (hoặc truyền data_range nếu khác). Mọi tensor sẽ được
+ép sang float và broadcast kích thước bằng nội suy bilinear nếu lệch.
 """
 
 import math
