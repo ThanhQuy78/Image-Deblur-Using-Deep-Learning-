@@ -73,8 +73,8 @@ def vgg_preprocess_caffe(x):
 
 def _load_vgg19_features() -> nn.Sequential:
     try:
-        from torchvision import models as tv_models  # noqa: F401
-    except Exception as e:  # pragma: no cover
+        from torchvision import models as tv_models
+    except Exception as e:
         raise ImportError(
             "Thiếu torchvision. Cài đặt bằng: pip install torchvision"
         ) from e
@@ -91,8 +91,8 @@ def _load_vgg19_features() -> nn.Sequential:
 
 def _load_vgg19_full() -> nn.Sequential:
     try:
-        from torchvision import models as tv_models  # noqa: F401
-    except Exception as e:  # pragma: no cover
+        from torchvision import models as tv_models
+    except Exception as e:
         raise ImportError(
             "Thiếu torchvision. Cài đặt bằng: pip install torchvision"
         ) from e
@@ -120,8 +120,8 @@ def _load_vgg19_full() -> nn.Sequential:
 
 def _load_vgg19_modified() -> nn.Sequential:
     try:
-        from torchvision import models as tv_models  # noqa: F401
-    except Exception as e:  # pragma: no cover
+        from torchvision import models as tv_models
+    except Exception as e:
         raise ImportError(
             "Thiếu torchvision. Cài đặt bằng: pip install torchvision"
         ) from e
@@ -170,6 +170,9 @@ class PerceptualLoss(nn.Module):
         enforce_same_size=False,
         tv_mode="l1",
         return_components=False,
+        feature_dist="mse",  # NEW: 'mse' | 'l1' cho khoảng cách feature
+        gram_norm="chwd",  # NEW: 'chwd' (chia C*H*W) | 'hw' (chia H*W)
+        cache_target=False,  # NEW: cache đặc trưng target giữa các forward
     ):
         """Khởi tạo PerceptualLoss.
         Tham số chính:
@@ -197,12 +200,19 @@ class PerceptualLoss(nn.Module):
             raise ValueError("reduction phải là 'mean' hoặc 'sum'")
         if tv_mode not in {"l1", "none"}:
             raise ValueError("tv_mode phải là 'l1' hoặc 'none'")
+        if feature_dist not in {"mse", "l1"}:
+            raise ValueError("feature_dist phải thuộc {'mse','l1'}")
+        if gram_norm not in {"chwd", "hw"}:
+            raise ValueError("gram_norm phải thuộc {'chwd','hw'}")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.match_mode = match_mode
         self.reduction = reduction
         self.add_tv = float(add_tv)
         self.enforce_same_size = enforce_same_size
         self.tv_mode = tv_mode
+        self.feature_dist = feature_dist
+        self.gram_norm = gram_norm
+        self.cache_target = cache_target
 
         # Load backbone
         if backbone_type == "vgg19_features":
@@ -307,11 +317,29 @@ class PerceptualLoss(nn.Module):
             x = x.float()
         return self.preprocess_fn(x)
 
-    @staticmethod
-    def _gram(x):
+    def _gram(self, x):
+        # cập nhật theo gram_norm
         b, c, h, w = x.shape
         f = x.view(b, c, h * w)
-        return torch.bmm(f, f.transpose(1, 2)) / (c * h * w)
+        g = torch.bmm(f, f.transpose(1, 2))
+        if self.gram_norm == "chwd":
+            return g / (c * h * w)
+        else:  # 'hw'
+            return g / (h * w)
+
+    def _feat_distance(self, a, b):
+        if self.feature_dist == "mse":
+            if self.reduction == "mean":
+                return F.mse_loss(a, b)
+            return F.mse_loss(a, b, reduction="sum")
+        else:  # 'l1'
+            if self.reduction == "mean":
+                return F.l1_loss(a, b)
+            return F.l1_loss(a, b, reduction="sum")
+
+    def _target_signature(self, t):
+        # signature đơn giản: shape + dtype + tổng giá trị (float)
+        return (tuple(t.shape), str(t.dtype), float(t.sum().item()))
 
     # ----------------- Forward -----------------
     def forward(self, pred, target):
@@ -341,20 +369,31 @@ class PerceptualLoss(nn.Module):
         pred_p = self._prepare(pred)
         tgt_p = self._prepare(target)
 
-        # Extract features target (no grad)
-        self._hook_outputs.clear()
-        with torch.no_grad():
-            _ = self.features(tgt_p)
-            target_feats = {
-                k: v.detach() for k, v in self._hook_outputs.items() if k in self.layers
-            }
+        # ===== Target features (có thể cache) =====
+        use_cache = self.cache_target
+        target_feats = None
+        if use_cache and self._cached_target_feats is not None:
+            sig = self._target_signature(target)
+            if sig == self._cached_target_sig:
+                target_feats = self._cached_target_feats
+        if target_feats is None:
+            self._hook_outputs.clear()
+            with torch.no_grad():
+                _ = self.features(tgt_p)
+                target_feats = {
+                    k: v.detach()
+                    for k, v in self._hook_outputs.items()
+                    if k in self.layers
+                }
+            if use_cache:
+                self._cached_target_feats = target_feats
+                self._cached_target_sig = self._target_signature(target)
 
-        # Extract pred (with grad)
+        # ===== Pred features =====
         self._hook_outputs.clear()
         _ = self.features(pred_p)
         pred_feats = {k: v for k, v in self._hook_outputs.items() if k in self.layers}
 
-        # Tổng hợp loss thành phần
         total = pred.new_tensor(0.0)
         perceptual_sum = pred.new_tensor(0.0)
         for lid in self.layers:
@@ -363,12 +402,8 @@ class PerceptualLoss(nn.Module):
             pf, tf = pred_feats[lid], target_feats[lid]
             if self.match_mode == "gram":
                 pf, tf = self._gram(pf), self._gram(tf)
-            if self.reduction == "mean":
-                li = F.mse_loss(pf, tf)
-            else:
-                li = F.mse_loss(pf, tf, reduction="sum")
-            weighted = li * self.layer_weights[lid]
-            perceptual_sum = perceptual_sum + weighted
+            li = self._feat_distance(pf, tf)
+            perceptual_sum = perceptual_sum + li * self.layer_weights[lid]
         total = perceptual_sum
         tv_comp = pred.new_tensor(0.0)
         if self.tv_weight > 0 and self.tv_mode == "l1":
