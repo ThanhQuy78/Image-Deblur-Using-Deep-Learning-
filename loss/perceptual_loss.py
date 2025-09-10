@@ -24,11 +24,19 @@ import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
+from typing import Optional
 
 try:
-    import torchvision.models as tv_models  # type: ignore
-except Exception as e:
-    raise ImportError("Thiếu torchvision. Cài đặt: pip install torchvision") from e
+    from torch.hub import download_url_to_file
+except Exception:
+    download_url_to_file = None
+
+# Thêm import torchvision.models với fallback
+try:
+    import torchvision.models as tv_models
+except Exception:  # pragma: no cover
+    tv_models = None
 
 from .vgg_modified import VGGModified
 
@@ -57,6 +65,11 @@ _LAYER_NAME_MAP_VGG19 = {
     35: "relu5_4",
 }
 
+# Đường dẫn mặc định tới VGG19 Caffe weights
+DEFAULT_VGG19_WEIGHTS_URL = (
+    "https://box.skoltech.ru/index.php/s/HPcOFQTjXxbmp4X/download"
+)
+
 # ---------------- TIỀN XỬ LÝ ----------------
 
 
@@ -80,29 +93,110 @@ def vgg_preprocess_caffe(x: torch.Tensor) -> torch.Tensor:
 
 # ---------------- BACKBONE LOADERS ----------------
 
+# Hỗ trợ load weights VGG19 từ file/URL bên ngoài
 
-def _load_vgg19_features() -> nn.Sequential:
-    try:
-        vgg = tv_models.vgg19(weights=tv_models.VGG19_Weights.IMAGENET1K_V1)
-    except Exception:
-        vgg = tv_models.vgg19(pretrained=True)
+
+def _load_state_dict_into_vgg(model: nn.Module, weights_path: str) -> nn.Module:
+    sd = torch.load(weights_path, map_location="cpu")
+    if isinstance(sd, dict) and "state_dict" in sd:
+        sd = sd["state_dict"]
+    if isinstance(sd, dict):
+        sd = {k.replace("module.", ""): v for k, v in sd.items()}
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    if missing:
+        warnings.warn(
+            f"Thiếu key khi load VGG19 từ {weights_path}: {list(missing)[:10]} ..."
+        )
+    if unexpected:
+        warnings.warn(f"Key không mong đợi khi load VGG19: {list(unexpected)[:10]} ...")
+    return model
+
+
+def _resolve_external_weights(vgg_weights: Optional[str]) -> Optional[str]:
+    if not vgg_weights:
+        return None
+    if isinstance(vgg_weights, str) and vgg_weights.lower().startswith(
+        ("http://", "https://")
+    ):
+        if download_url_to_file is None:
+            warnings.warn(
+                "Không thể tải URL do thiếu download_url_to_file. Vui lòng tải thủ công."
+            )
+            return None
+        base_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "weights")
+        )
+        os.makedirs(base_dir, exist_ok=True)
+        dest = os.path.join(base_dir, "vgg19_external.pth")
+        try:
+            download_url_to_file(vgg_weights, dest, progress=True)
+            return dest
+        except Exception as e:
+            warnings.warn(f"Tải weights thất bại: {e}")
+            return None
+    if os.path.isfile(vgg_weights):
+        return vgg_weights
+    warnings.warn(f"Không tìm thấy file weights: {vgg_weights}")
+    return None
+
+
+def _load_vgg19_features(weights_path: Optional[str] = None) -> nn.Sequential:
+    # Yêu cầu torchvision
+    if tv_models is None:
+        raise ImportError(
+            "torchvision.models is required to load VGG19. Please install torchvision."
+        )
+    vgg = None
+    if weights_path:
+        try:
+            try:
+                vgg = tv_models.vgg19(weights=None)
+            except Exception:
+                vgg = tv_models.vgg19(pretrained=False)
+            _load_state_dict_into_vgg(vgg, weights_path)
+        except Exception as e:
+            warnings.warn(
+                f"Load external VGG19 weights lỗi ({e}), dùng ImageNet mặc định."
+            )
+    if vgg is None:
+        try:
+            vgg = tv_models.vgg19(weights=tv_models.VGG19_Weights.IMAGENET1K_V1)
+        except Exception:
+            vgg = tv_models.vgg19(pretrained=True)
     feats = vgg.features.eval()
     for p in feats.parameters():
         p.requires_grad = False
     return feats
 
 
-def _load_vgg19_full() -> nn.Sequential:
-    try:
-        vgg = tv_models.vgg19(weights=tv_models.VGG19_Weights.IMAGENET1K_V1)
-    except Exception:
-        vgg = tv_models.vgg19(pretrained=True)
+def _load_vgg19_full(weights_path: Optional[str] = None) -> nn.Sequential:
+    # Yêu cầu torchvision
+    if tv_models is None:
+        raise ImportError(
+            "torchvision.models is required to load VGG19. Please install torchvision."
+        )
+    vgg = None
+    if weights_path:
+        try:
+            try:
+                vgg = tv_models.vgg19(weights=None)
+            except Exception:
+                vgg = tv_models.vgg19(pretrained=False)
+            _load_state_dict_into_vgg(vgg, weights_path)
+        except Exception as e:
+            warnings.warn(
+                f"Load external VGG19 weights lỗi ({e}), dùng ImageNet mặc định."
+            )
+    if vgg is None:
+        try:
+            vgg = tv_models.vgg19(weights=tv_models.VGG19_Weights.IMAGENET1K_V1)
+        except Exception:
+            vgg = tv_models.vgg19(pretrained=True)
     seq = nn.Sequential()
     idx = 0
     for m in vgg.features:
         seq.add_module(str(idx), m)
         idx += 1
-    # Thay adaptive pool + flatten trước classifier để đồng nhất index
     seq.add_module(str(idx), nn.AdaptiveAvgPool2d((7, 7)))
     idx += 1
     seq.add_module(str(idx), nn.Flatten())
@@ -115,11 +209,31 @@ def _load_vgg19_full() -> nn.Sequential:
     return seq.eval()
 
 
-def _load_vgg19_modified(slope=0.01) -> nn.Sequential:
-    try:
-        base = tv_models.vgg19(weights=tv_models.VGG19_Weights.IMAGENET1K_V1)
-    except Exception:
-        base = tv_models.vgg19(pretrained=True)
+def _load_vgg19_modified(
+    slope=0.01, weights_path: Optional[str] = None
+) -> nn.Sequential:
+    # Yêu cầu torchvision
+    if tv_models is None:
+        raise ImportError(
+            "torchvision.models is required to load VGG19. Please install torchvision."
+        )
+    base = None
+    if weights_path:
+        try:
+            try:
+                base = tv_models.vgg19(weights=None)
+            except Exception:
+                base = tv_models.vgg19(pretrained=False)
+            _load_state_dict_into_vgg(base, weights_path)
+        except Exception as e:
+            warnings.warn(
+                f"Load external VGG19 weights lỗi ({e}), dùng ImageNet mặc định."
+            )
+    if base is None:
+        try:
+            base = tv_models.vgg19(weights=tv_models.VGG19_Weights.IMAGENET1K_V1)
+        except Exception:
+            base = tv_models.vgg19(pretrained=True)
     mod = VGGModified(base, slope=slope).eval()
     for p in mod.parameters():
         p.requires_grad = False
@@ -162,6 +276,7 @@ class PerceptualLoss(nn.Module):
         feature_dist="mse",  # 'mse' | 'l1'
         gram_norm="chwd",  # 'chwd' (C*H*W) | 'hw' (H*W)
         cache_target=False,
+        vgg_weights: Optional[str] = None,  # path hoặc URL đến weights VGG19 bên ngoài
     ):
         super().__init__()
         # ------- Validate -------
@@ -204,13 +319,27 @@ class PerceptualLoss(nn.Module):
         self.tv_weight = tv_weight
         self.return_components = return_components
 
+        # Nếu không cung cấp, dùng URL mặc định (Caffe) và bật Caffe preprocessing
+        if vgg_weights is None:
+            vgg_weights = DEFAULT_VGG19_WEIGHTS_URL
+            if not use_caffe:
+                warnings.warn(
+                    "Dùng VGG19 weights mặc định (Caffe). Tự động bật Caffe preprocessing."
+                )
+                use_caffe = True
+
+        # Giải quyết đường dẫn/URL weights tùy chỉnh nếu có
+        resolved_vgg_w = _resolve_external_weights(vgg_weights)
+
         # ------- Backbone -------
         if backbone_type == "vgg19_features":
-            self.features = _load_vgg19_features()
+            self.features = _load_vgg19_features(weights_path=resolved_vgg_w)
         elif backbone_type == "vgg19_full":
-            self.features = _load_vgg19_full()
+            self.features = _load_vgg19_full(weights_path=resolved_vgg_w)
         else:
-            self.features = _load_vgg19_modified(slope=modified_slope)
+            self.features = _load_vgg19_modified(
+                slope=modified_slope, weights_path=resolved_vgg_w
+            )
         self.features = self.features.to(self.device)
 
         # ------- Layers & weights -------
