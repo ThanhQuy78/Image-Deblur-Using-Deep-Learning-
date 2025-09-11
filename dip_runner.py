@@ -348,9 +348,11 @@ def run_dip(
     img_t = np_to_torch(img_np).to(device)
 
     sharp_np = None
+    sharp_t = None
     if sharp_path and os.path.exists(sharp_path):
         sharp_pil = crop_image(load_img(sharp_path))
         sharp_np = pil_to_np(sharp_pil)
+        sharp_t = np_to_torch(sharp_np).to(device)
 
     # Khởi tạo mạng và noise z
     net = get_net(
@@ -526,6 +528,16 @@ def run_dip(
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     save_torch_img(out, save_path)
     print(f"Đã lưu: {save_path}")
+
+    # Tổng hợp metrics cuối cùng
+    metrics: Dict[str, float] = {}
+    with torch.no_grad():
+        pred_final = A(out).clamp(0, 1)
+        metrics["psnr_obs"] = float(compute_psnr(pred_final, img_t))
+        if sharp_t is not None:
+            metrics["psnr_gt"] = float(compute_psnr(out, sharp_t))
+            metrics["ssim_gt"] = float(compute_ssim(out, sharp_t))
+    return metrics
 
 
 def _dump_effective_config(eff: Dict[str, Any], path: str):
@@ -709,6 +721,10 @@ def main():
         help="Thư mục gốc GoPro (nếu đặt sẽ chạy batch)",
     )
     p.add_argument("--gopro_csv", type=str, default="", help="CSV ghi kết quả batch")
+    # Ghi metrics cho lần chạy đơn
+    p.add_argument(
+        "--metrics_csv", type=str, default="", help="Ghi metrics (PSNR/SSIM) vào CSV"
+    )
 
     args = p.parse_args()
 
@@ -735,8 +751,24 @@ def main():
             with open(args.dump_config, "w", encoding="utf-8") as f:
                 json.dump(run_kwargs, f, indent=2, ensure_ascii=False)
 
-    # Gọi run_dip với từ điển tham số đã đầy đủ (không còn thiếu obspath)
-    run_dip(**run_kwargs)
+    # Gọi run_dip và (tuỳ chọn) ghi metrics CSV
+    result = run_dip(**run_kwargs)
+    if args.metrics_csv:
+        os.makedirs(os.path.dirname(args.metrics_csv) or ".", exist_ok=True)
+        row = {
+            "obs": run_kwargs.get("obspath", ""),
+            "gt": run_kwargs.get("sharp_path", ""),
+            "out": run_kwargs.get("save_path", ""),
+        }
+        if isinstance(result, dict):
+            row.update({k: float(v) for k, v in result.items()})
+        write_header = not os.path.exists(args.metrics_csv)
+        with open(args.metrics_csv, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=row.keys())
+            if write_header:
+                w.writeheader()
+            w.writerow(row)
+        print(f"Đã ghi metrics: {args.metrics_csv}")
 
 
 if __name__ == "__main__":
