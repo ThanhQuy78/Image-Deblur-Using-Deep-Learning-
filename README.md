@@ -86,7 +86,7 @@ python dip_runner.py --gopro_root D:/data/GOPRO_Large/test --out_dir outputs/gop
   --motion_len 9 --amp --tile_size 512 --tile_overlap 64 --holdout_p 0.05 --early_patience 2
 ```
 
-Các tuỳ chọn CLI chính:
+## Các tuỳ chọn CLI chính:
 - --net: skip | UNet | ResNet | dcgan
 - --op: identity | blur | motion | piecewise | downsample | blur_downsample | mask
   - piecewise params: --grid_nx/--grid_ny, --pw_mode [fixed|gradient|random], --angle_min/--angle_max, --len_min/--len_max, --blend/--no_blend, --blend_ratio
