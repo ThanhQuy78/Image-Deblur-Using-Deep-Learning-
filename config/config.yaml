@@ -1,0 +1,62 @@
+# config.yaml — Cấu hình tổng quát cho dự án DIP Deblur
+# Mọi giá trị có thể được override bởi CLI hoặc biến môi trường tuỳ ý.
+
+project:  # Thông tin thư mục mặc định
+  repo_root: .
+  data_dir: data
+  outputs_dir: outputs
+  checkpoints_dir: checkpoints
+  logs_dir: logs
+
+experiment:
+  name: dip_deblur
+
+io:  # Đường dẫn I/O chính
+  obs: blurred.png        # Ảnh quan sát (bắt buộc)
+  gt: sharp.png           # Ảnh ground-truth (tuỳ chọn); bỏ trống nếu không có
+  out: outputs/deblurred.png
+  save_vis: true          # Có thể dùng cho routine vẽ/so sánh nếu cần
+
+model:  # Cấu hình mạng (khởi tạo qua models.get_net)
+  type: skip              # skip | UNet | ResNet | dcgan
+  input_depth: 32         # số kênh noise đầu vào (z)
+  n_channels: 3           # số kênh ảnh ra (RGB=3)
+  upsample_mode: bilinear # chế độ nội suy khi upsample (nếu áp dụng)
+  pad: reflection         # reflection|zero|replication (tuỳ kiến trúc)
+  # Tham số bổ sung cho biến thể khác (nếu dùng):
+  res_blocks: 8           # ResNet: số residual blocks
+  res_feat: 64            # ResNet: số kênh feature
+
+operator:  # Toán tử quan sát A
+  name: blur              # identity|blur|downsample|blur_downsample|mask
+  kernel_size: 21         # blur: kích thước kernel (lẻ)
+  kernel_sigma: 2.0       # blur: độ lệch chuẩn Gaussian
+  ds_factor: 2            # downsample: hệ số giảm mẫu
+  ds_kernel: lanczos2     # downsample: kernel chống alias (lanczos2|lanczos3|box|gauss)
+  padding: replicate      # blur: padding cho biên (replicate|reflect|zero)
+
+optim:  # Tham số tối ưu DIP
+  lr: 0.001
+  num_iter: 3000
+  show_every: 100
+  ema: 0.99               # hệ số EMA cho đầu ra (làm mượt)
+  reg_noise_std: 0.0333333333  # độ lệch chuẩn tiêm nhiễu vào z mỗi vòng
+  clip_grad_norm: null     # giới hạn norm gradient (null: tắt)
+
+loss:  # Trọng số các hàm mất mát
+  mse_weight: 1.0
+  tv_weight: 1.0e-5        # tổng biến phân (Total Variation)
+  use_percep: true
+  percep_weight: 0.05
+
+eval:  # Thiết lập đánh giá
+  compute_psnr: true
+  compute_ssim: true
+  report_csv: outputs/metrics.csv
+
+export:  # Xuất mô hình
+  save_torchscript: true
+  torchscript_path: outputs/dip_net_traced.pt
+
+seed: 1337
+device: auto  # auto|cpu|cuda

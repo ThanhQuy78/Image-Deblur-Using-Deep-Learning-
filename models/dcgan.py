@@ -2,26 +2,26 @@
 ================
 
 Generator DCGAN tối giản dùng trong vai trò prior (ví dụ DIP) hoặc ví dụ sinh ảnh.
-Tuỳ chọn hai chế độ upsampling: ConvTranspose2d (need_convT=True) hoặc Upsample+Conv
-(need_convT=False) để giảm checkerboard.
+Tuỳ chọn hai chế độ upsampling:
+- ConvTranspose2d (need_convT=True)
+- Upsample + Conv (need_convT=False) để giảm checkerboard.
 
 Tham số:
---------
- inp             : số kênh đầu vào (noise map)
- ndf             : số kênh ẩn cố định (feature width)
- num_ups         : số khối phóng to (bao gồm block cuối)
- need_sigmoid    : True -> thêm Sigmoid nếu output_act không chỉ định
- need_bias       : bias cho conv thường (không áp dụng convT hiện để False)
- pad             : reserved (hiện chưa dùng mở rộng padding)
- upsample_mode   : 'nearest'|'bilinear' cho nhánh Upsample+Conv
- need_convT      : True -> dùng ConvTranspose2d, False -> Upsample+Conv
- output_channels : số kênh ảnh đầu ra (mặc định 3)
- output_act      : None|'sigmoid'|'tanh' (override need_sigmoid)
- weight_init     : None|'dcgan'|'kaiming'
+- inp: số kênh đầu vào (noise map)
+- ndf: số kênh ẩn cố định (feature width)
+- num_ups: số khối phóng to (bao gồm block cuối)
+- need_sigmoid: True -> thêm Sigmoid nếu output_act không chỉ định
+- need_bias: bias cho Conv/ConvTranspose
+- pad: reserved (hiện chưa dùng mở rộng padding)
+- upsample_mode: 'nearest'|'bilinear' cho nhánh Upsample+Conv
+- need_convT: True -> dùng ConvTranspose2d, False -> Upsample+Conv
+- output_channels: số kênh ảnh đầu ra (mặc định 3)
+- output_act: None|'sigmoid'|'tanh' (override need_sigmoid)
+- weight_init: None|'dcgan'|'kaiming'
 
-Ghi chú:
-- Đầu vào nên là noise 4D (B, inp, h, w) h nhỏ để có quỹ đạo tối ưu tốt.
-- Khi dùng DIP, giữ fixed noise trong suốt quá trình tối ưu tham số.
+Gợi ý:
+- DIP: giữ noise đầu vào cố định trong suốt tối ưu.
+- Tránh checkerboard: ưu tiên Upsample+Conv.
 """
 
 import torch.nn as nn
@@ -51,17 +51,19 @@ def dcgan(
         output_act = "sigmoid"
 
     layers = [
-        nn.ConvTranspose2d(inp, ndf, kernel_size=3, stride=1, padding=0, bias=False),
+        nn.ConvTranspose2d(
+            inp, ndf, kernel_size=3, stride=1, padding=0, bias=need_bias
+        ),
         nn.BatchNorm2d(ndf),
         nn.LeakyReLU(0.2, inplace=True),
     ]
 
     # Các tầng phóng to trung gian
-    for _ in range(num_ups - 3):
+    for _ in range(max(0, num_ups - 3)):
         if need_convT:
             layers += [
                 nn.ConvTranspose2d(
-                    ndf, ndf, kernel_size=4, stride=2, padding=1, bias=False
+                    ndf, ndf, kernel_size=4, stride=2, padding=1, bias=need_bias
                 ),
                 nn.BatchNorm2d(ndf),
                 nn.LeakyReLU(0.2, inplace=True),
@@ -69,19 +71,19 @@ def dcgan(
         else:
             layers += [
                 nn.Upsample(scale_factor=2, mode=upsample_mode),
-                nn.Conv2d(ndf, ndf, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.Conv2d(ndf, ndf, kernel_size=3, stride=1, padding=1, bias=need_bias),
                 nn.BatchNorm2d(ndf),
                 nn.LeakyReLU(0.2, inplace=True),
             ]
 
     # Tầng cuối ra ảnh
     if need_convT:
-        layers += [nn.ConvTranspose2d(ndf, output_channels, 4, 2, 1, bias=False)]
+        layers += [nn.ConvTranspose2d(ndf, output_channels, 4, 2, 1, bias=need_bias)]
     else:
         layers += [
-            nn.Upsample(scale_factor=2, mode="bilinear"),
+            nn.Upsample(scale_factor=2, mode=upsample_mode),
             nn.Conv2d(
-                ndf, output_channels, kernel_size=3, stride=1, padding=1, bias=False
+                ndf, output_channels, kernel_size=3, stride=1, padding=1, bias=need_bias
             ),
         ]
 

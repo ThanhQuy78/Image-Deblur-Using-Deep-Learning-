@@ -1,37 +1,19 @@
 """models.skip
 ===============
 
-Xây dựng kiến trúc encoder-decoder kiểu U-Net tùy biến với skip connections linh hoạt cho DIP.
-Cho phép quy định số kênh riêng ở mỗi scale: num_channels_down, num_channels_up, num_channels_skip.
-
-Ý tưởng:
-- Mỗi scale gồm: (tùy) nhánh skip nông + nhánh deeper (downsample + conv sâu) -> merge qua Concat.
-- Sau khi xử lý deeper ở scale i (và đi sâu hơn), kết thúc bằng upsample để trả feature lên trên.
-- Tại điểm kết thúc của scale i: ghép skip[i] + output deeper (đã upsample) -> conv giảm kênh -> (tùy) conv 1x1 tinh chỉnh.
+Kiến trúc encoder-decoder kiểu U-Net tuỳ biến với skip connections cho DIP.
+- Cho phép quy định số kênh riêng ở mỗi scale: num_channels_down, num_channels_up, num_channels_skip.
+- Hỗ trợ upsample_mode ('nearest'|'bilinear') và nhiều cách downsample ('stride'|'avg'|'max'|'lanczos2').
 
 Tham số chính:
---------------
- num_input_channels  : kênh noise/ảnh vào
- num_output_channels : kênh ảnh ra
- num_channels_down   : list kênh encoder mỗi scale
- num_channels_up     : list kênh decoder mỗi scale
- num_channels_skip   : list kênh skip mỗi scale
- filter_size_down/up : kernel conv chính encoder/decoder
- filter_skip_size    : kernel conv nhánh skip
- upsample_mode       : 'nearest'|'bilinear'
- downsample_mode     : 'stride'|'avg'|'max'|'lanczos2'
- need1x1_up          : thêm conv 1x1 sau khối up để tăng khả năng trộn kênh
- need_sigmoid        : áp Sigmoid cuối
- pad                 : 'zero'|'reflection'
- act_fun             : chuỗi / module activation
-
-Ghi chú:
-- Việc tách cấu hình kênh giúp thử nghiệm bias kiến trúc dễ dàng (quan trọng với DIP).
-- Dùng bn() sau merge để ổn định phân phối feature.
-- Các nhánh deeper dùng conv stride 2 (hoặc pool theo downsample_mode) để giảm kích thước.
+- num_input_channels/num_output_channels: số kênh vào/ra
+- num_channels_down/up/skip: cấu hình kênh theo từng scale
+- filter_size_down/up/skip: kích thước kernel
+- need1x1_up: thêm conv 1x1 sau up block
+- need_sigmoid/output_act: điều khiển kích hoạt cuối
+- act_fun/pad: activation và padding nội bộ
 """
 
-import torch
 import torch.nn as nn
 from .common import Concat, bn, conv, act
 

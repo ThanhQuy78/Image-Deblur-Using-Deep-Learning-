@@ -5,22 +5,14 @@ Triển khai biến thể U-Net cấu hình được (feature_scale, more_layers
 Dùng trong DIP để cung cấp inductive bias encoder-decoder với skip connections.
 
 Tham số chính UNet:
--------------------
- num_input_channels  : kênh noise/ảnh đầu vào
- num_output_channels : kênh ảnh đầu ra
- feature_scale       : hệ số chia số kênh chuẩn (giảm tài nguyên: 1|2|4|8)
- more_layers         : số tầng sâu thêm (beyond depth chuẩn 5 levels)
- concat_x            : nếu True concat ảnh gốc vào mỗi scale (conditioning)
- upsample_mode       : 'deconv'|'nearest'|'bilinear'
- pad                 : 'zero'|'replication'|'none'
- norm_layer          : lớp chuẩn hoá (InstanceNorm2d|BatchNorm2d|None)
- need_sigmoid        : Sigmoid cuối (đưa về [0,1])
- need_bias           : bias cho conv
-
-Ghi chú:
-- Khi concat_x=True, ở mỗi scale ảnh gốc (đã downsample tương ứng) ghép vào feature map -> giữ thông tin low-level.
-- more_layers > 0 thêm cặp down/up ở đáy giúp tăng receptive field.
-- upsample_mode='deconv' có thể gây checkerboard; 'bilinear' + conv thường mượt hơn.
+- num_input_channels/num_output_channels: kênh vào/ra
+- feature_scale: hệ số giảm số kênh chuẩn (1|2|4|8)
+- more_layers: số tầng sâu thêm ở đáy
+- concat_x: ghép ảnh gốc vào tại các scale (conditioning)
+- upsample_mode: 'deconv'|'nearest'|'bilinear'
+- pad: 'zero'|'replication'|'none'
+- norm_layer: lớp chuẩn hoá (InstanceNorm2d|BatchNorm2d|None)
+- need_sigmoid/need_bias/final_activation: điều khiển kích hoạt và bias cuối
 """
 
 import torch
@@ -163,7 +155,7 @@ class UNet(nn.Module):
                 raise ValueError("Unsupported final_activation")
 
     def forward(self, inputs):
-        # Pre-compute các phiên bản downsample của input nếu concat_x
+        # Tiền xử lý: tạo danh sách các phiên bản downsample của input để concat nếu bật concat_x
         downs = [inputs]
         down = nn.AvgPool2d(2, 2)
         for i in range(4 + self.more_layers):

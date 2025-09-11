@@ -1,22 +1,12 @@
 """models.texture_nets
 =====================
 
-Xây dựng mạng tổng hợp texture đa tỉ lệ (multi-scale) sử dụng trong DIP / texture synthesis.
-Ý tưởng chính:
-- Tạo nhiều nhánh (scale) từ ảnh đầu vào bằng Average Pool với tỉ lệ ratios[i].
-- Mỗi scale: chuỗi conv (3x3,3x3,1x1) + BN + activation.
-- Trộn dần các scale bằng cách: upsample output scale trước rồi concat với scale kế tiếp (Concat).
-- Mỗi lần hợp nhất: tăng số kênh theo j (số scale đã gộp), rồi thêm các conv trộn lại.
+Mạng tổng hợp texture đa tỉ lệ dùng trong DIP/texture synthesis.
+- Mỗi scale: AvgPool -> chuỗi Conv(3,3,1) + BN + Act.
+- Gộp dần: Upsample output scale trước, Concat với scale hiện tại, rồi Conv trộn lại.
+- Hỗ trợ tuỳ chọn noise nhánh (fill_noise) để tăng đa dạng hoá pattern.
 
-Tham số:
---------
- inp           : số kênh đầu vào
- ratios        : list tỉ lệ pooling (lớn -> coarse)
- fill_noise    : nếu True chèn thêm kênh noise (GenNoise) sau pooling
- pad           : kiểu padding 'zero' | 'reflection'
- need_sigmoid  : thêm Sigmoid cuối
- conv_num      : số kênh cơ sở mỗi scale
- upsample_mode : 'nearest' | 'bilinear'
+Tham số chính: inp, ratios, fill_noise, pad, conv_num, upsample_mode, output_channels, output_act.
 
 Ghi chú:
 - Thiết kế ưu tiên pattern lặp / regular. Ít phù hợp trực tiếp deblur nhưng hữu dụng làm prior.
@@ -44,6 +34,15 @@ def conv(in_f, out_f, kernel_size, stride=1, bias=True, pad="zero"):
             nn.Conv2d(in_f, out_f, kernel_size, stride, padding=0, bias=bias),
         ]
         return nn.Sequential(*layers)
+
+
+# Helper: add to Sequential with unique names
+_counter = {"seq": 0}
+
+
+def add(m: nn.Sequential, layer: nn.Module, prefix: str = "layer"):
+    _counter["seq"] += 1
+    m.add_module(f"{prefix}_{_counter['seq']}", layer)
 
 
 def get_texture_nets(
@@ -77,26 +76,26 @@ def get_texture_nets(
 
         tmp = nn.AvgPool2d(ratios[i], ratios[i])  # pooling coarse
 
-        seq.add(tmp)
+        add(seq, tmp, "pool")
         if fill_noise:
-            seq.add(GenNoise(inp))
+            add(seq, GenNoise(inp), "noise")
 
         # Khối conv cơ sở cho scale i
-        seq.add(conv(inp, conv_num, 3, pad=pad))
-        seq.add(normalization(conv_num))
-        seq.add(act())
+        add(seq, conv(inp, conv_num, 3, pad=pad), "conv")
+        add(seq, normalization(conv_num), "bn")
+        add(seq, act(), "act")
 
-        seq.add(conv(conv_num, conv_num, 3, pad=pad))
-        seq.add(normalization(conv_num))
-        seq.add(act())
+        add(seq, conv(conv_num, conv_num, 3, pad=pad), "conv")
+        add(seq, normalization(conv_num), "bn")
+        add(seq, act(), "act")
 
-        seq.add(conv(conv_num, conv_num, 1, pad=pad))
-        seq.add(normalization(conv_num))
-        seq.add(act())
+        add(seq, conv(conv_num, conv_num, 1, pad=pad), "conv")
+        add(seq, normalization(conv_num), "bn")
+        add(seq, act(), "act")
 
         if i == 0:
             # Scale đầu: chỉ upsample để chuẩn bị trộn scale kế
-            seq.add(nn.Upsample(scale_factor=2, mode=upsample_mode))
+            add(seq, nn.Upsample(scale_factor=2, mode=upsample_mode), "ups")
             cur = seq
         else:
             cur_temp = cur  # model tích luỹ trước
@@ -104,34 +103,34 @@ def get_texture_nets(
             cur = nn.Sequential()
 
             # Batch norm trước khi merge giúp cân bằng phân phối
-            seq.add(normalization(conv_num))
-            cur_temp.add(normalization(conv_num * (j - 1)))
+            add(seq, normalization(conv_num), "bn")
+            add(cur_temp, normalization(conv_num * (j - 1)), "bn")
 
-            cur.add(Concat(1, cur_temp, seq))  # concat kênh
+            add(cur, Concat(1, cur_temp, seq), "concat")  # concat kênh
 
             # Trộn lại sau concat bằng chuỗi conv
-            cur.add(conv(conv_num * j, conv_num * j, 3, pad=pad))
-            cur.add(normalization(conv_num * j))
-            cur.add(act())
+            add(cur, conv(conv_num * j, conv_num * j, 3, pad=pad), "conv")
+            add(cur, normalization(conv_num * j), "bn")
+            add(cur, act(), "act")
 
-            cur.add(conv(conv_num * j, conv_num * j, 3, pad=pad))
-            cur.add(normalization(conv_num * j))
-            cur.add(act())
+            add(cur, conv(conv_num * j, conv_num * j, 3, pad=pad), "conv")
+            add(cur, normalization(conv_num * j), "bn")
+            add(cur, act(), "act")
 
-            cur.add(conv(conv_num * j, conv_num * j, 1, pad=pad))
-            cur.add(normalization(conv_num * j))
-            cur.add(act())
+            add(cur, conv(conv_num * j, conv_num * j, 1, pad=pad), "conv")
+            add(cur, normalization(conv_num * j), "bn")
+            add(cur, act(), "act")
 
             if i == len(ratios) - 1:
-                cur.add(conv(conv_num * j, output_channels, 1, pad=pad))
+                add(cur, conv(conv_num * j, output_channels, 1, pad=pad), "head")
             else:
-                cur.add(nn.Upsample(scale_factor=2, mode=upsample_mode))
+                add(cur, nn.Upsample(scale_factor=2, mode=upsample_mode), "ups")
     model = cur
     if output_act:
         if output_act == "sigmoid":
-            model.add(nn.Sigmoid())
+            add(model, nn.Sigmoid(), "sigmoid")
         elif output_act == "tanh":
-            model.add(nn.Tanh())
+            add(model, nn.Tanh(), "tanh")
         else:
             raise ValueError("Output_act không được hỗ trợ")
     return model

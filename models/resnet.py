@@ -2,26 +2,25 @@
 =================
 
 Triển khai mạng ResNet đơn giản dùng cho Deep Image Prior / phục hồi ảnh.
-Cấu trúc: Conv đầu -> chuỗi residual blocks (Conv-BN-Act-Conv-BN) -> Conv + BN -> Conv cuối -> Sigmoid (tuỳ chọn).
+Cấu trúc: Conv đầu -> chuỗi residual blocks (Conv-BN-Act-Conv-BN) -> Conv + BN -> Conv cuối -> Kích hoạt cuối (tuỳ chọn).
 
 Tham số chính (ResNet class):
------------------------------
- num_input_channels : kênh đầu vào (noise/ảnh degraded)
- num_output_channels: kênh đầu ra (ảnh khôi phục)
- num_blocks         : số residual blocks (độ sâu phần giữa)
- num_channels       : số kênh feature cố định toàn bộ mạng
- need_residual      : True -> dùng ResidualSequential bọc block (tự cộng skip); False -> stack tuần tự
- act_fun            : hàm kích hoạt nội bộ ('LeakyReLU', 'ELU', ...)
- need_sigmoid       : True -> áp sigmoid cuối (giới hạn [0,1])
- norm_layer         : lớp chuẩn hoá (BatchNorm2d / InstanceNorm2d ...)
- pad                : kiểu padding cho conv helper ('reflection' | 'zero')
+- num_input_channels: kênh đầu vào (noise/ảnh degraded)
+- num_output_channels: kênh đầu ra (ảnh khôi phục)
+- num_blocks: số residual blocks (độ sâu phần giữa)
+- num_channels: số kênh feature cố định toàn bộ mạng
+- need_residual: True -> dùng ResidualSequential (tự cộng skip); False -> stack tuần tự
+- act_fun: activation nội bộ ('LeakyReLU', 'ELU', ...)
+- need_sigmoid: True -> dùng Sigmoid cuối nếu output_act không chỉ định
+- norm_layer: lớp chuẩn hoá (BatchNorm2d / InstanceNorm2d ...)
+- pad: kiểu padding cho conv helper ('reflection' | 'zero')
+- output_act: None|'sigmoid'|'tanh' (ưu tiên hơn need_sigmoid)
+- need_bias: bật/tắt bias cho các conv
 
 Ghi chú thiết kế:
------------------
-* Các block giữ nguyên spatial size (padding=1 cho kernel 3).
-* ResidualSequential hiện tự cắt crop nếu kích thước lệch (phòng hộ, hiếm khi xảy ra).
-* Chưa có cơ chế down/up-sampling nên depth ảnh hưởng chủ yếu đến biểu diễn phi tuyến.
-* Có thể mở rộng: thêm dilated conv, weight init tùy chỉnh, bỏ Sigmoid nếu training với range khác.
+- Các block giữ nguyên spatial size (padding=1 cho kernel 3).
+- ResidualSequential tự crop trung tâm nếu lệch kích thước (phòng hộ).
+- Không có down/up-sampling; biểu diễn phụ thuộc số block/kênh.
 """
 
 import torch.nn as nn
@@ -51,13 +50,13 @@ class ResidualSequential(nn.Sequential):
         return out + x
 
 
-def get_block(num_channels, norm_layer, act_fun):
+def get_block(num_channels, norm_layer, act_fun, need_bias=False):
     """Tạo 1 residual block: Conv -> BN -> Act -> Conv -> BN (chưa cộng skip)."""
     layers = [
-        nn.Conv2d(num_channels, num_channels, 3, 1, 1, bias=False),
+        nn.Conv2d(num_channels, num_channels, 3, 1, 1, bias=need_bias),
         norm_layer(num_channels, affine=True),
         act(act_fun),
-        nn.Conv2d(num_channels, num_channels, 3, 1, 1, bias=False),
+        nn.Conv2d(num_channels, num_channels, 3, 1, 1, bias=need_bias),
         norm_layer(num_channels, affine=True),
     ]
     return layers
@@ -85,6 +84,7 @@ class ResNet(nn.Module):
         norm_layer=nn.BatchNorm2d,
         pad="reflection",
         output_act=None,
+        need_bias=True,
     ):
         """Khởi tạo ResNet.
 
@@ -99,16 +99,18 @@ class ResNet(nn.Module):
 
         # First layers
         layers = [
-            conv(num_input_channels, num_channels, 3, stride=1, bias=True, pad=pad),
+            conv(
+                num_input_channels, num_channels, 3, stride=1, bias=need_bias, pad=pad
+            ),
             act(act_fun),
         ]
         # Residual blocks
         for i in range(num_blocks):
-            layers += [s(*get_block(num_channels, norm_layer, act_fun))]
+            layers += [s(*get_block(num_channels, norm_layer, act_fun, need_bias))]
 
         # Transition Conv + BN
         layers += [
-            nn.Conv2d(num_channels, num_channels, 3, 1, 1),
+            nn.Conv2d(num_channels, num_channels, 3, 1, 1, bias=need_bias),
             norm_layer(num_channels, affine=True),
         ]
 
@@ -125,7 +127,7 @@ class ResNet(nn.Module):
             tail_act = nn.Sigmoid()
 
         layers += [
-            conv(num_channels, num_output_channels, 3, 1, bias=True, pad=pad),
+            conv(num_channels, num_output_channels, 3, 1, bias=need_bias, pad=pad),
             tail_act,
         ]
         self.model = nn.Sequential(*layers)

@@ -1,6 +1,15 @@
 """models.downsampler
 =====================
 
+Bộ lọc giảm mẫu chống alias cho ảnh/feature map.
+- Hỗ trợ các kernel: 'lanczos2' | 'lanczos3' | 'gauss' | 'box'.
+- Đóng gói dưới dạng nn.Module (Conv depthwise) với stride=factor.
+- Tuỳ chọn preserve_size dùng pad replication để giữ nguyên kích thước biên.
+
+Sử dụng:
+- Được gọi gián tiếp từ hàm conv(...) trong models.common khi downsample_mode là 'lanczos2'/'lanczos3'.
+- Có thể sử dụng trực tiếp như 1 operator quan sát A trong các bài toán SR.
+
 Cung cấp lớp Downsampler tạo phép downsample với kernel tùy chọn (lanczos2, lanczos3,
 gauss, box). Dùng trong các module khác (ví dụ conv trong common.py) để kiểm soát
 aliasing khi giảm kích thước thay vì stride trực tiếp.

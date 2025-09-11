@@ -1,14 +1,14 @@
 """models package
 =================
-Factory get_net khởi tạo mạng cho các thí nghiệm khôi phục ảnh / DIP.
-Chọn NET_TYPE trong: 'skip','texture_nets','ResNet','UNet','dcgan','identity'.
-Dùng: net = get_net('skip', input_depth=32, n_channels=3).
-Các hàm tiện ích: count_params, model_summary, smoke_test.
+Factory đơn giản tạo các mạng dùng cho DIP: 'skip','texture_nets','ResNet','UNet','dcgan','identity'.
+- get_net: khởi tạo mạng theo tên và tham số cấu hình chính.
+- count_params, smoke_test: tiện ích nhanh cho kiểm thử.
 """
 
 from __future__ import annotations
 import torch
 import torch.nn as nn
+import inspect
 from .skip import skip
 from .texture_nets import get_texture_nets
 from .resnet import ResNet
@@ -23,38 +23,16 @@ __all__ = [
     "UNet",
     "dcgan",
     "count_params",
-    "model_summary",
     "smoke_test",
 ]
 
 
-# ----------------- Lightweight utils (tự cung cấp) -----------------
+# ----------------- Lightweight utils -----------------
 
 
 def count_params(model: nn.Module) -> int:
     """Đếm số tham số trainable."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def model_summary(model: nn.Module, input_size=(1, 3, 64, 64)) -> str:
-    """Tạo chuỗi tóm tắt ngắn gọn (không phụ thuộc third-party)."""
-    n_params = count_params(model)
-    try:
-        dummy = torch.randn(*input_size)
-        with torch.no_grad():
-            out = model(dummy)
-        out_shape = tuple(out.shape) if isinstance(out, torch.Tensor) else type(out)
-    except Exception as e:  # pragma: no cover
-        out_shape = f"Forward error: {e}"
-    lines = [
-        "Model Summary",
-        "--------------",
-        f"Input size  : {input_size}",
-        f"Output shape: {out_shape}",
-        f"Trainable params: {n_params}",
-        "--------------",
-    ]
-    return "\n".join(lines)
 
 
 def smoke_test(model: nn.Module, input_size=(1, 3, 32, 32)) -> bool:
@@ -64,11 +42,21 @@ def smoke_test(model: nn.Module, input_size=(1, 3, 32, 32)) -> bool:
         with torch.no_grad():
             _ = model(torch.randn(*input_size))
         return True
-    except Exception:  # pragma: no cover
+    except Exception:
         return False
 
 
 # ----------------- Factory -----------------
+
+
+def _call_with_supported(ctor, /, *args, **kwargs):
+    """Call ctor filtering out unsupported kwargs by introspecting its signature."""
+    try:
+        sig = inspect.signature(ctor)
+        filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    except Exception:
+        filtered = kwargs
+    return ctor(*args, **filtered)
 
 
 def get_net(
@@ -91,6 +79,7 @@ def get_net(
     dcgan_ndf=64,
     dcgan_ups=4,
     dcgan_convT=True,
+    res_need_residual=True,
 ):
     # Chuẩn hóa pad
     if pad not in {"reflection", "zero", "replication"}:
@@ -100,31 +89,46 @@ def get_net(
         output_act = "sigmoid"
     if output_act not in {None, "sigmoid", "tanh", "identity"}:
         raise ValueError(f"Unsupported output_act: {output_act}")
+    # Xử lý trường hợp đặc biệt cho 'identity'
+    if output_act == "identity":
+        output_act = None
 
     if NET_TYPE == "ResNet":
-        net = ResNet(
+        net = _call_with_supported(
+            ResNet,
             input_depth,
             n_channels,
             num_blocks=res_blocks,
             num_channels=res_feat,
-            need_sigmoid=int(need_sigmoid),
+            need_residual=res_need_residual,
+            need_sigmoid=bool(need_sigmoid),
             norm_layer=norm_layer,
             need_bias=True,
+            pad=pad,
             output_act=output_act,
         )
     elif NET_TYPE == "skip":
-        net = skip(
+        # Normalize and validate channel lists
+        ch_down = (
+            [skip_n33d] * num_scales if isinstance(skip_n33d, int) else list(skip_n33d)
+        )
+        ch_up = (
+            [skip_n33u] * num_scales if isinstance(skip_n33u, int) else list(skip_n33u)
+        )
+        ch_skip = (
+            [skip_n11] * num_scales if isinstance(skip_n11, int) else list(skip_n11)
+        )
+        if not (len(ch_down) == len(ch_up) == len(ch_skip) == num_scales):
+            raise ValueError(
+                f"skip: length mismatch — num_scales={num_scales}, got down={len(ch_down)}, up={len(ch_up)}, skip={len(ch_skip)}"
+            )
+        net = _call_with_supported(
+            skip,
             input_depth,
             n_channels,
-            num_channels_down=[skip_n33d] * num_scales
-            if isinstance(skip_n33d, int)
-            else skip_n33d,
-            num_channels_up=[skip_n33u] * num_scales
-            if isinstance(skip_n33u, int)
-            else skip_n33u,
-            num_channels_skip=[skip_n11] * num_scales
-            if isinstance(skip_n11, int)
-            else skip_n11,
+            num_channels_down=ch_down,
+            num_channels_up=ch_up,
+            num_channels_skip=ch_skip,
             upsample_mode=upsample_mode,
             downsample_mode=downsample_mode,
             need_sigmoid=need_sigmoid,
@@ -134,7 +138,8 @@ def get_net(
             output_act=output_act,
         )
     elif NET_TYPE == "texture_nets":
-        net = get_texture_nets(
+        net = _call_with_supported(
+            get_texture_nets,
             inp=input_depth,
             ratios=[32, 16, 8, 4, 2, 1],
             fill_noise=False,
@@ -144,7 +149,8 @@ def get_net(
             output_act=output_act,
         )
     elif NET_TYPE == "UNet":
-        net = UNet(
+        net = _call_with_supported(
+            UNet,
             num_input_channels=input_depth,
             num_output_channels=n_channels,
             feature_scale=4,
@@ -156,14 +162,17 @@ def get_net(
             need_sigmoid=need_sigmoid,
             need_bias=True,
             final_activation=output_act,
+            output_act=output_act,
         )
     elif NET_TYPE == "dcgan":
         if dcgan_ups < 3:
             raise ValueError("dcgan: num_ups phải >= 3 để đảm bảo kích thước hợp lệ")
-        net = dcgan(
+        net = _call_with_supported(
+            dcgan,
             inp=input_depth,
             ndf=dcgan_ndf,
             num_ups=dcgan_ups,
+            need_bias=True,
             need_sigmoid=need_sigmoid,
             upsample_mode=upsample_mode,
             need_convT=dcgan_convT,
@@ -175,7 +184,7 @@ def get_net(
             raise ValueError(
                 f"identity: yêu cầu input_depth==n_channels (got {input_depth}!={n_channels})"
             )
-        net = nn.Sequential()
+        net = nn.Identity()
     else:
         raise ValueError(f"Unknown NET_TYPE: {NET_TYPE}")
     return net

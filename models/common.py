@@ -1,19 +1,17 @@
 """models.common
 ================
 
-Helper chung cho các kiến trúc DIP:
-- Concat: nối feature nhiều nhánh, auto crop trung tâm nếu lệch kích thước.
-- GenNoise: sinh noise Gaussian dạng feature map có kênh tùy chọn.
-- Swish / act: factory kích hoạt.
-- bn: BatchNorm2d đơn giản.
-- conv: wrapper cho Conv2d kèm tuỳ chọn downsample rõ ràng (avg/max/lanczos) thay stride conv.
-- Hàm khởi tạo trọng số phổ biến (DCGAN style / Kaiming) để dễ apply từ ngoài.
+Tiện ích dùng chung để lắp ráp các kiến trúc DIP:
+- Concat: nối feature từ nhiều nhánh, tự crop trung tâm nếu lệch kích thước.
+- GenNoise: sinh noise Gaussian dạng feature map với số kênh tuỳ chọn.
+- Swish/act: factory kích hoạt.
+- bn: BatchNorm2d cơ bản.
+- conv: bọc Conv2d với padding 'reflection' và cơ chế downsample rõ ràng (avg/max/lanczos) tách khỏi stride conv.
+- weight_init_*: các hàm khởi tạo trọng số phổ biến.
 
-Tối ưu/Chỉnh sửa:
-- Thêm __all__ để giới hạn export.
-- conv(): bỏ filter() để giảm overhead, code rõ ràng hơn.
-- Đưa kernel downsample (Lanczos) sang Downsampler (đã register_buffer ở file kia) -> an toàn device.
-- Cảnh báo: Monkey patch Module.add vẫn giữ để không phá code cũ nhưng không khuyến khích dùng.
+Lưu ý tương thích:
+- Hàm conv sẽ dùng Downsampler khi downsample_mode in {'lanczos2','lanczos3'} để chống alias.
+- Monkey patch Module.add giữ lại để không phá code cũ (không khuyến nghị dùng trong code mới).
 """
 
 import torch
@@ -45,6 +43,7 @@ torch.nn.Module.add = add_module  # type: ignore
 # -----------------------------------------------------------------------------
 # Core building blocks
 # -----------------------------------------------------------------------------
+# Concat: Ghép tensor theo chiều dim, tự canh/crop trung tâm nếu lệch 1-2 px do upsample/pooling.
 class Concat(nn.Module):
     """Ghép output nhiều module theo dim; auto crop nếu lệch kích thước.
 
@@ -58,6 +57,7 @@ class Concat(nn.Module):
             self.add_module(str(idx), module)
 
     def forward(self, input):
+        # Thu thập output các nhánh và cắt đồng kích thước theo tâm trước khi concat
         outputs = [m(input) for m in self._modules.values()]
         h_targets = [o.shape[2] for o in outputs]
         w_targets = [o.shape[3] for o in outputs]
@@ -78,6 +78,7 @@ class Concat(nn.Module):
         return len(self._modules)
 
 
+# GenNoise: Sinh tensor noise chuẩn N(0,1) mới cho mỗi lần forward (trên cùng device/dtype với input).
 class GenNoise(nn.Module):
     """Sinh noise Gaussian mới mỗi forward (không cố định seed)."""
 
@@ -86,12 +87,14 @@ class GenNoise(nn.Module):
         self.dim2 = dim2
 
     def forward(self, input):
+        # shape out có cùng B,H,W với input, nhưng số kênh thay bằng dim2
         shape = list(input.size())
         shape[1] = self.dim2
         noise = torch.randn(shape, device=input.device, dtype=input.dtype)
         return noise
 
 
+# Swish: x * sigmoid(x)
 class Swish(nn.Module):
     def __init__(self):
         super().__init__()
@@ -102,10 +105,10 @@ class Swish(nn.Module):
 
 
 def act(act_fun="LeakyReLU"):
-    """Factory trả về activation.
+    """Factory trả về module kích hoạt.
 
-    Hỗ trợ: 'LeakyReLU' | 'Swish' | 'ELU' | 'none'.
-    Có thể truyền module class tùy chỉnh -> sẽ được khởi tạo không tham số.
+    Hỗ trợ chuỗi: 'LeakyReLU' | 'Swish' | 'ELU' | 'none';
+    Hoặc truyền vào class module tuỳ chỉnh -> sẽ được khởi tạo không tham số.
     """
     if isinstance(act_fun, str):
         if act_fun == "LeakyReLU":
@@ -121,6 +124,7 @@ def act(act_fun="LeakyReLU"):
 
 
 def bn(num_features):
+    """BatchNorm2d với affine=True (theo mặc định của PyTorch)."""
     return nn.BatchNorm2d(num_features)
 
 
@@ -133,14 +137,14 @@ def conv(
     pad: str = "zero",
     downsample_mode: str = "stride",
 ) -> nn.Module:
-    """Wrapper conv với tuỳ chọn downsample rõ ràng & reflection pad.
+    """Conv2d wrapper với padding 'reflection' và downsample rõ ràng.
 
-    Args:
-        in_f/out_f: kênh in/out
-        kernel_size: kích thước kernel (odd)
-        stride: nếu >1 & downsample_mode=='stride' -> conv stride; else dùng pooling/Downsampler.
-        pad: 'zero' | 'reflection'
-        downsample_mode: 'stride' | 'avg' | 'max' | 'lanczos2' | 'lanczos3'
+    Tham số:
+    - in_f/out_f: số kênh vào/ra
+    - kernel_size: kích thước kernel (số lẻ)
+    - stride: nếu >1 & downsample_mode=='stride' -> dùng conv stride; ngược lại dùng Avg/Max/Downsampler
+    - pad: 'zero' | 'reflection'
+    - downsample_mode: 'stride' | 'avg' | 'max' | 'lanczos2' | 'lanczos3'
     """
     downsampler = None
     if stride != 1 and downsample_mode != "stride":
@@ -180,6 +184,7 @@ def conv(
 # Weight init utilities
 # -----------------------------------------------------------------------------
 def weight_init_dcgan(m):  # pragma: no cover (thường gọi qua .apply)
+    """Khởi tạo kiểu DCGAN: Conv ~ N(0,0.02), BN: gamma~N(1,0.02), beta=0."""
     cls = m.__class__.__name__
     if cls.find("Conv") != -1:
         nn.init.normal_(m.weight.data, 0.0, 0.02)
@@ -191,6 +196,7 @@ def weight_init_dcgan(m):  # pragma: no cover (thường gọi qua .apply)
 
 
 def weight_init_kaiming(m):  # pragma: no cover
+    """Khởi tạo Kaiming cho Conv2d (leaky_relu), BN: gamma=1, beta=0."""
     if isinstance(m, nn.Conv2d):
         nn.init.kaiming_normal_(m.weight, nonlinearity="leaky_relu")
         if m.bias is not None:

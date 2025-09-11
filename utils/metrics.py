@@ -8,6 +8,14 @@ Bao gồm:
 
 Giả định ảnh đã chuẩn hoá về [0,1] (hoặc truyền data_range nếu khác). Mọi tensor sẽ được
 ép sang float và broadcast kích thước bằng nội suy bilinear nếu lệch.
+
+Các thước đo đánh giá chất lượng:
+- compute_psnr: Peak Signal-to-Noise Ratio (dB), mong chờ dữ liệu trong [0,1].
+- compute_ssim: Structural Similarity, hỗ trợ dạng numpy (C,H,W) trong [0,1].
+
+Lưu ý:
+- SSIM/PSNR nhạy với miền giá trị đầu vào; đảm bảo chuẩn hoá đúng.
+- Có thể áp dụng trên kênh Y thay vì RGB nếu muốn gần với nhận thức thị giác hơn.
 """
 
 import math
