@@ -458,15 +458,15 @@ def run_dip(
         else:
             out_ema = out_ema * ema_decay + out.detach() * (1 - ema_decay)
 
-        # Metrics đơn giản
-        out_np = torch_to_np(out.detach().clamp(0, 1))
-        psnr_val = compute_psnr(out_np, img_np)
+        # Metrics trong không gian quan sát: so sánh A(out) với y
+        psnr_val = compute_psnr(pred.detach().clamp(0, 1), img_t)
 
-        # Early stopping bằng hold-out (không dùng GT)
+        # Early stopping bằng hold-out (không dùng GT) trong không gian quan sát
         if hold_mask is not None and i % show_every == 0:
-            out_hold_np = torch_to_np((out.detach() * hold_mask).clamp(0, 1))
-            gt_hold_np = torch_to_np((img_t.detach() * hold_mask).clamp(0, 1))
-            psnr_hold = compute_psnr(out_hold_np, gt_hold_np)
+            psnr_hold = compute_psnr(
+                (pred.detach() * hold_mask).clamp(0, 1),
+                (img_t.detach() * hold_mask).clamp(0, 1),
+            )
             if psnr_hold > best_hold + 1e-6:
                 best_hold = psnr_hold
                 patience = 0
@@ -474,8 +474,9 @@ def run_dip(
                 patience += 1
 
         if i % show_every == 0:
-            msg = f"Vòng lặp {i:05d} | Loss {float(loss.item()):.6f} | PSNR {psnr_val:.2f}"
+            msg = f"Vòng lặp {i:05d} | Loss {float(loss.item()):.6f} | PSNR_obs {psnr_val:.2f}"
             if sharp_np is not None:
+                out_np = torch_to_np(out.detach().clamp(0, 1))
                 psnr_gt = compute_psnr(out_np, sharp_np)
                 ssim_gt = compute_ssim(out_np, sharp_np)
                 msg += f" | PSNR_gt {psnr_gt:.2f} | SSIM_gt {ssim_gt:.3f}"
