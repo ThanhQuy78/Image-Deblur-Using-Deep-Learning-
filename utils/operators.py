@@ -185,7 +185,7 @@ class PiecewiseBlur(nn.Module):
             t = torch.linspace(0, math.pi, steps=xw, device=device, dtype=dtype)
             fade = 0.5 * (1 - torch.cos(t))
             x[0, :xw] = fade
-            x[0, -xw:] = fade.flip(1)
+            x[0, -xw:] = fade.flip(0)
         return (y @ x).clamp_(1e-6, 1.0)  # tránh chia 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

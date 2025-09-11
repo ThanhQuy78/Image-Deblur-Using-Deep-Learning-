@@ -418,7 +418,7 @@ def run_dip(
         train_mask = 1.0 - hold_mask
 
     # AMP
-    scaler = torch.cuda.amp.GradScaler(enabled=amp and torch.cuda.is_available())
+    scaler = torch.amp.GradScaler("cuda", enabled=amp and torch.cuda.is_available())
 
     # EMA & backtracking
     out_ema = None
@@ -434,7 +434,7 @@ def run_dip(
         if reg_noise_std > 0:
             z = z_saved + (noise_buf.normal_() * reg_noise_std)
 
-        with torch.cuda.amp.autocast(enabled=bool(scaler._enabled)):
+        with torch.amp.autocast("cuda", enabled=bool(scaler._enabled)):
             out = net(z)
             pred = A(out)
             # Loss tổng
