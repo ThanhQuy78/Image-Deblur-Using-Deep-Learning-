@@ -23,17 +23,26 @@ model:  # Cấu hình mạng (khởi tạo qua models.get_net)
   n_channels: 3           # số kênh ảnh ra (RGB=3)
   upsample_mode: bilinear # chế độ nội suy khi upsample (nếu áp dụng)
   pad: reflection         # reflection|zero|replication (tuỳ kiến trúc)
-  # Tham số bổ sung cho biến thể khác (nếu dùng):
-  res_blocks: 8           # ResNet: số residual blocks
-  res_feat: 64            # ResNet: số kênh feature
 
 operator:  # Toán tử quan sát A
-  name: blur              # identity|blur|downsample|blur_downsample|mask
+  name: piecewise         # identity|blur|motion|piecewise|downsample|blur_downsample|mask
   kernel_size: 21         # blur: kích thước kernel (lẻ)
   kernel_sigma: 2.0       # blur: độ lệch chuẩn Gaussian
   ds_factor: 2            # downsample: hệ số giảm mẫu
   ds_kernel: lanczos2     # downsample: kernel chống alias (lanczos2|lanczos3|box|gauss)
+  motion_len: 9           # motion blur: độ dài chuyển động
+  motion_angle: 0.0       # motion blur: góc chuyển động
   padding: replicate      # blur: padding cho biên (replicate|reflect|zero)
+  # piecewise: thông số mờ không đồng nhất theo lưới
+  grid_nx: 3              # số ô theo trục X
+  grid_ny: 3              # số ô theo trục Y
+  pw_mode: gradient       # fixed|gradient|random
+  angle_min: -10.0        # cho gradient/random
+  angle_max: 10.0         # cho gradient/random
+  len_min: 5              # độ dài tối thiểu khi random
+  len_max: 15             # độ dài tối đa khi random
+  blend: true             # trộn mép giữa các ô
+  blend_ratio: 0.15       # biên trộn theo tỉ lệ kích thước ô
 
 optim:  # Tham số tối ưu DIP
   lr: 0.001
@@ -41,7 +50,6 @@ optim:  # Tham số tối ưu DIP
   show_every: 100
   ema: 0.99               # hệ số EMA cho đầu ra (làm mượt)
   reg_noise_std: 0.0333333333  # độ lệch chuẩn tiêm nhiễu vào z mỗi vòng
-  clip_grad_norm: null     # giới hạn norm gradient (null: tắt)
 
 loss:  # Trọng số các hàm mất mát
   mse_weight: 1.0

@@ -1,20 +1,20 @@
 # Image-Deblur (Deep Image Prior)
 
-Khoá luận/đồ án minh hoạ khử mờ ảnh bằng Deep Image Prior (DIP). Repository cung cấp mô hình dựng ảnh, toán tử quan sát (A), trình chạy DIP end-to-end, cùng notebook hướng dẫn đầy đủ.
+Khoá luận/đồ án minh hoạ khử mờ ảnh bằng Deep Image Prior (DIP). Repository cung cấp mô hình dựng ảnh, toán tử quan sát (A), trình chạy DIP end-to-end.
 
 - Không cần dữ liệu huấn luyện: tối ưu trực tiếp tham số mạng để khớp A(G(z;θ)) với ảnh quan sát y.
 - Hỗ trợ khử mờ Gaussian, giảm mẫu, inpainting,… thông qua các toán tử quan sát có thể ghép nối.
 
 ## Tính năng chính
 - Mô hình (models): skip, UNet, ResNet, dcgan; factory get_net đồng bộ chữ ký tham số, hỗ trợ pad/upsample/need_bias.
-- Toán tử quan sát (utils/operators.py): Gaussian Blur, Downsample (anti-alias), Mask, Compose.
+- Toán tử quan sát (utils/operators.py): Gaussian Blur, MotionBlur (độ dài/góc), PiecewiseBlur (mờ không đồng nhất theo lưới), Downsample (anti-alias), Mask, Compose.
 - Trình chạy DIP (dip_runner.py):
   - MSE + TV + (tuỳ chọn) Perceptual Loss.
   - EMA đầu ra, backtracking đơn giản, ghi log PSNR.
-  - CLI tiện dụng cho các kịch bản phổ biến, hỗ trợ cấu hình YAML.
-  - Nạp YAML (--config), CLI ghi đè cấu hình, in/lưu "cấu hình hiệu dụng" (--print_config/--dump_config).
-- Notebook deblur_full.ipynb: quy trình toàn diện từ thiết lập, tối ưu, đánh giá, suy luận tới xuất mô hình và benchmark.
-- Cấu hình YAML (config.yaml): tham số hoá IO, model, operator, optim, loss, eval, export.
+  - AMP (mixed precision), suy luận theo ô (tile) cho ảnh lớn, early stopping bằng hold‑out mask.
+  - CLI tiện dụng, hỗ trợ cấu hình YAML; in/lưu "cấu hình hiệu dụng" (--print_config/--dump_config).
+  - Chế độ chạy hàng loạt cho GoPro (--gopro_root) và xuất CSV.
+- Cấu hình YAML (config/config.yaml): tham số hoá IO, model, operator (kể cả motion), optim, loss, eval, export.
 
 ## Cấu trúc thư mục
 - models/
@@ -22,9 +22,9 @@ Khoá luận/đồ án minh hoạ khử mờ ảnh bằng Deep Image Prior (DIP)
   - common.py, skip.py, unet.py, resnet.py, dcgan.py, texture_nets.py, downsampler.py
 - utils/
   - operators.py (A), image_io.py, metrics.py, torch_utils.py, visualization.py
-- dip_runner.py: trình chạy DIP qua CLI hoặc API
+- dip_runner.py: trình chạy DIP qua CLI hoặc API (YAML, AMP, tile, hold‑out, GoPro batch)
 - deblur_full.ipynb: notebook tổng hợp (Việt hoá)
-- config.yaml: cấu hình mẫu dự án
+- config/config.yaml: cấu hình mẫu dự án
 
 ## Yêu cầu & cài đặt
 - Python >= 3.8
@@ -51,8 +51,10 @@ python dip_runner.py --obs blurred.png --out outputs/deblurred.png \
   --op blur --kernel_size 21 --kernel_sigma 2.0 --iters 3000 --net skip --input_depth 32 \
   --percep --percep_w 0.05 --tv 1e-5 --ema 0.99 --show_every 100
 
-# Có GT để theo dõi PSNR_gt
-python dip_runner.py --obs blurred.png --gt sharp.png --out outputs/deblurred.png --op blur --iters 2000
+# Khử mờ chuyển động (motion blur) xấp xỉ
+a=21; L=9; ANG=15
+python dip_runner.py --obs blurred.png --out outputs/deblur_motion.png \
+  --op motion --motion_len $L --motion_angle $ANG --iters 3000
 
 # Giảm mẫu (SR x2 theo DIP)
 python dip_runner.py --obs blurred.png --out outputs/restore.png --op downsample --ds_factor 2 --iters 2000
@@ -75,11 +77,23 @@ python dip_runner.py --config config/config.yaml --dump_config outputs/effective
 python dip_runner.py --config config/config.yaml --dump_config outputs/effective.json
 ```
 
+### GoPro batch
+```bash
+# Chạy batch trên bộ GOPRO_Large/test (sẽ dò blur/* và ánh xạ sang sharp/* nếu có)
+# Gợi ý cấu hình cho blur không đồng nhất: piecewise với góc biến thiên theo trục X
+python dip_runner.py --gopro_root D:/data/GOPRO_Large/test --out_dir outputs/gopro --iters 2000 \
+  --op piecewise --grid_nx 3 --grid_ny 3 --pw_mode gradient --angle_min -12 --angle_max 12 \
+  --motion_len 9 --amp --tile_size 512 --tile_overlap 64 --holdout_p 0.05 --early_patience 2
+```
+
 Các tuỳ chọn CLI chính:
 - --net: skip | UNet | ResNet | dcgan
-- --op: identity | blur | downsample | blur_downsample | mask
+- --op: identity | blur | motion | piecewise | downsample | blur_downsample | mask
+  - piecewise params: --grid_nx/--grid_ny, --pw_mode [fixed|gradient|random], --angle_min/--angle_max, --len_min/--len_max, --blend/--no_blend, --blend_ratio
 - --percep, --percep_w: bật và chọn trọng số perceptual loss (nếu module khả dụng)
 - --tv: trọng số total-variation
+- --amp: bật mixed precision; --tile_size/--tile_overlap: suy luận theo ô; --holdout_p/--early_patience: dừng sớm
+- --config/--print_config/--dump_config: YAML và cấu hình hiệu dụng; --gopro_root/--gopro_csv: chạy batch và xuất CSV
 
 ## Notebook
 Mở deblur_full.ipynb và chạy tuần tự các ô:
@@ -92,16 +106,13 @@ Mở deblur_full.ipynb và chạy tuần tự các ô:
 Các nhóm tham số chính:
 - project, io: đường dẫn vào/ra, thư mục checkpoint/logs.
 - model: type, input_depth, n_channels, upsample_mode, pad, tham số phụ (ResNet,...)
-- operator: blur/downsample/compose và tuỳ chọn kernel.
+- operator: blur/motion/downsample/compose và tuỳ chọn kernel.
 - optim: lr, num_iter, reg_noise_std, ema, show_every.
 - loss: mse_weight, tv_weight, use_percep, percep_weight.
 - eval, export: báo cáo và xuất mô hình.
   
 Ghi chú:
-- Khi dùng `--config`, các khoá liên quan trực tiếp tới runner sẽ được đọc: 
-  - io.obs, io.gt, io.out; model.type, model.input_depth, model.upsample_mode;
-  - operator.name/kernel_size/kernel_sigma/ds_factor/ds_kernel;
-  - optim.lr/num_iter/show_every/ema/reg_noise_std; loss.tv_weight/use_percep/percep_weight; seed.
+- Khi dùng `--config`, các khoá liên quan trực tiếp tới runner sẽ được đọc và ánh xạ vào tham số run_dip.
 - Tham số qua CLI (ví dụ `--iters`, `--op`, `--percep_w`...) luôn ghi đè cấu hình YAML.
 
 ## Mô hình hỗ trợ
@@ -112,6 +123,7 @@ Ghi chú:
 
 ## Toán tử quan sát (A)
 - Blur: làm mờ Gaussian depthwise.
+- MotionBlur: làm mờ theo hướng (độ dài/góc) cho chuyển động tuyến tính.
 - DownsampleOp: giảm mẫu chống alias (Lanczos/Box/Gauss).
 - Mask: inpainting (áp mask nhị phân/mềm).
 - Compose: ghép nhiều A tuần tự.
@@ -132,6 +144,9 @@ run_dip(
     num_iter=2000,
     use_percep=True,
     percep_weight=0.05,
+    amp=True,
+    tile_size=512,
+    tile_overlap=64,
 )
 ```
 
