@@ -2,17 +2,9 @@
 =============
 
 Trình chạy tối ưu Deep Image Prior (DIP) end-to-end.
-- Hỗ trợ các mô hình trong models.get_net (skip/UNet/ResNet/dcgan).
-- Toán tử quan sát A: blur/downsample/mask/compose/motion.
-- Regularization: TV và (tuỳ chọn) perceptual loss.
-- Theo dõi: PSNR (quan sát) và PSNR_gt (nếu có GT), EMA và backtracking đơn giản.
-
-Tích hợp cấu hình YAML:
-- Có thể nạp file YAML (--config) để lấy tham số mặc định.
-- Tham số CLI luôn ghi đè cấu hình YAML.
-- Có thể in/lưu "cấu hình hiệu dụng" (sau hợp nhất) với --print_config/--dump_config.
 """
 
+# Thêm import rõ ràng và tách dòng (PEP8)
 import argparse
 import os
 import json
@@ -39,7 +31,7 @@ from utils.operators import (
 
 # PyYAML (tuỳ chọn)
 try:
-    import yaml
+    import yaml  # type: ignore
 except Exception:  # pragma: no cover
     yaml = None  # type: ignore
 
@@ -61,6 +53,7 @@ def tv_loss(x: torch.Tensor) -> torch.Tensor:
 
 
 def _read_yaml(path: str) -> Dict[str, Any]:
+    """Đọc cấu hình từ YAML/JSON. Yêu cầu PyYAML nếu là YAML."""
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Không tìm thấy file cấu hình: {path}")
     if path.endswith((".yml", ".yaml")):
@@ -70,13 +63,13 @@ def _read_yaml(path: str) -> Dict[str, Any]:
             )
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
-    else:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _get_nested(d: Dict[str, Any], keys: str, default: Any = None) -> Any:
-    cur = d
+    """Lấy giá trị lồng nhau theo chuỗi khóa 'a.b.c' với mặc định."""
+    cur: Any = d
     for k in keys.split("."):
         if not isinstance(cur, dict) or k not in cur:
             return default
@@ -85,16 +78,17 @@ def _get_nested(d: Dict[str, Any], keys: str, default: Any = None) -> Any:
 
 
 def _build_run_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Trích xuất các tham số cần cho run_dip từ cấu hình YAML."""
+    """Trích xuất tham số đầu vào run_dip từ cấu hình."""
     out: Dict[str, Any] = {}
+    # IO
     out["obspath"] = _get_nested(cfg, "io.obs")
     out["sharp_path"] = _get_nested(cfg, "io.gt", None)
     out["save_path"] = _get_nested(cfg, "io.out", "outputs/deblurred.png")
-
+    # Model
     out["net_type"] = _get_nested(cfg, "model.type", "skip")
     out["input_depth"] = int(_get_nested(cfg, "model.input_depth", 32))
     out["upsample_mode"] = _get_nested(cfg, "model.upsample_mode", "bilinear")
-
+    # Operator (bao gồm motion/piecewise nếu có)
     out["op_name"] = _get_nested(cfg, "operator.name", "identity")
     out["kernel_size"] = int(_get_nested(cfg, "operator.kernel_size", 21))
     out["kernel_sigma"] = float(_get_nested(cfg, "operator.kernel_sigma", 2.0))
@@ -102,7 +96,6 @@ def _build_run_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     out["ds_kernel"] = _get_nested(cfg, "operator.ds_kernel", "lanczos2")
     out["motion_len"] = int(_get_nested(cfg, "operator.motion_len", 9))
     out["motion_angle"] = float(_get_nested(cfg, "operator.motion_angle", 0.0))
-    # piecewise blur
     out["grid_nx"] = int(_get_nested(cfg, "operator.grid_nx", 3))
     out["grid_ny"] = int(_get_nested(cfg, "operator.grid_ny", 3))
     out["pw_mode"] = _get_nested(cfg, "operator.pw_mode", "gradient")
@@ -112,17 +105,17 @@ def _build_run_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     out["len_max"] = int(_get_nested(cfg, "operator.len_max", 15))
     out["blend"] = bool(_get_nested(cfg, "operator.blend", True))
     out["blend_ratio"] = float(_get_nested(cfg, "operator.blend_ratio", 0.15))
-
+    # Optim
     out["lr"] = float(_get_nested(cfg, "optim.lr", 1e-3))
     out["num_iter"] = int(_get_nested(cfg, "optim.num_iter", 3000))
     out["show_every"] = int(_get_nested(cfg, "optim.show_every", 100))
     out["ema_decay"] = float(_get_nested(cfg, "optim.ema", 0.99))
     out["reg_noise_std"] = float(_get_nested(cfg, "optim.reg_noise_std", 1.0 / 30.0))
-
+    # Loss
     out["tv_weight"] = float(_get_nested(cfg, "loss.tv_weight", 1e-5))
     out["use_percep"] = bool(_get_nested(cfg, "loss.use_percep", False))
     out["percep_weight"] = float(_get_nested(cfg, "loss.percep_weight", 0.0))
-
+    # Seed
     out["seed"] = int(_get_nested(cfg, "seed", 1337))
     return out
 
@@ -130,16 +123,18 @@ def _build_run_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
 def _merge_cli_over_yaml(
     parser: argparse.ArgumentParser, args: argparse.Namespace, base: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Trộn tham số CLI (ưu tiên) lên cấu hình YAML đã đọc."""
+    """Gộp CLI (ưu tiên) lên cấu hình YAML. Đảm bảo obspath/save_path có mặt."""
     merged = dict(base)
-    # Map tên arg CLI -> khoá run_dip
     mapping = {
+        # IO
         "obs": "obspath",
         "gt": "sharp_path",
         "out": "save_path",
+        # Model
         "net": "net_type",
         "input_depth": "input_depth",
         "upsample": "upsample_mode",
+        # Operator
         "op": "op_name",
         "kernel_size": "kernel_size",
         "kernel_sigma": "kernel_sigma",
@@ -147,6 +142,16 @@ def _merge_cli_over_yaml(
         "ds_kernel": "ds_kernel",
         "motion_len": "motion_len",
         "motion_angle": "motion_angle",
+        "grid_nx": "grid_nx",
+        "grid_ny": "grid_ny",
+        "pw_mode": "pw_mode",
+        "angle_min": "angle_min",
+        "angle_max": "angle_max",
+        "len_min": "len_min",
+        "len_max": "len_max",
+        "blend": "blend",
+        "blend_ratio": "blend_ratio",
+        # Optim/Loss/tiện ích
         "lr": "lr",
         "iters": "num_iter",
         "show_every": "show_every",
@@ -161,26 +166,27 @@ def _merge_cli_over_yaml(
         "tile_overlap": "tile_overlap",
         "holdout_p": "holdout_p",
         "early_patience": "early_patience",
-        "grid_nx": "grid_nx",
-        "grid_ny": "grid_ny",
-        "pw_mode": "pw_mode",
-        "angle_min": "angle_min",
-        "angle_max": "angle_max",
-        "len_min": "len_min",
-        "len_max": "len_max",
-        "blend": "blend",
-        "blend_ratio": "blend_ratio",
     }
     defaults = {
-        a.dest: a.default
+        a.dest: getattr(a, "default", None)
         for g in parser._action_groups
-        for a in g._group_actions
-        if hasattr(a, "dest")
+        for a in getattr(g, "_group_actions", [])
     }
     for cli_key, run_key in mapping.items():
-        val = getattr(args, cli_key, None)
-        if val is not None and val != defaults.get(cli_key):
-            merged[run_key] = val
+        if hasattr(args, cli_key):
+            val = getattr(args, cli_key)
+            if val is not None and (
+                cli_key not in defaults or val != defaults[cli_key]
+            ):
+                merged[run_key] = val
+    # Bảo đảm các khoá bắt buộc có giá trị fallback từ CLI
+    merged["obspath"] = merged.get("obspath") or getattr(args, "obs", None)
+    merged["save_path"] = merged.get("save_path") or getattr(args, "out", None)
+    merged["net_type"] = merged.get("net_type") or getattr(args, "net", "skip")
+    if not merged.get("obspath"):
+        raise ValueError(
+            "Thiếu đường dẫn ảnh quan sát: hãy truyền --obs hoặc đặt io.obs trong YAML"
+        )
     return merged
 
 
@@ -689,16 +695,9 @@ def main():
 
     # Cấu hình YAML
     p.add_argument("--config", type=str, default="", help="Đường dẫn YAML cấu hình")
+    p.add_argument("--print_config", action="store_true", help="In cấu hình hiệu dụng")
     p.add_argument(
-        "--print_config",
-        action="store_true",
-        help="In cấu hình hiệu dụng rồi tiếp tục chạy",
-    )
-    p.add_argument(
-        "--dump_config",
-        type=str,
-        default="",
-        help="Lưu cấu hình hiệu dụng ra YAML/JSON",
+        "--dump_config", type=str, default="", help="Lưu cấu hình hiệu dụng YAML/JSON"
     )
 
     # Batch GoPro
@@ -712,62 +711,31 @@ def main():
 
     args = p.parse_args()
 
-    # Chế độ batch GoPro
-    if args.gopro_root:
+    # Batch GoPro (nếu đặt thư mục)
+    if getattr(args, "gopro_root", ""):
         _run_gopro_batch(args)
         return
 
-    # Hợp nhất YAML + CLI
-    base = {}
+    # Hợp nhất cấu hình
+    base: Dict[str, Any] = {}
     if args.config:
         cfg = _read_yaml(args.config)
         base = _build_run_kwargs_from_cfg(cfg)
-    eff = _merge_cli_over_yaml(p, args, base)
+    run_kwargs = _merge_cli_over_yaml(p, args, base)
 
-    # In/lưu cấu hình hiệu dụng (nếu yêu cầu)
     if args.print_config:
-        print(json.dumps(eff, indent=2, ensure_ascii=False))
+        print(json.dumps(run_kwargs, indent=2, ensure_ascii=False))
     if args.dump_config:
-        _dump_effective_config(eff, args.dump_config)
+        os.makedirs(os.path.dirname(args.dump_config) or ".", exist_ok=True)
+        if args.dump_config.endswith((".yml", ".yaml")) and yaml is not None:
+            with open(args.dump_config, "w", encoding="utf-8") as f:
+                yaml.safe_dump(run_kwargs, f, allow_unicode=True, sort_keys=False)
+        else:
+            with open(args.dump_config, "w", encoding="utf-8") as f:
+                json.dump(run_kwargs, f, indent=2, ensure_ascii=False)
 
-    run_dip(
-        obspath=eff.get("obspath", args.obs),
-        sharp_path=eff.get("sharp_path", args.gt if args.gt else None),
-        save_path=eff.get("save_path", args.out),
-        net_type=eff.get("net_type", args.net),
-        input_depth=int(eff.get("input_depth", args.input_depth)),
-        lr=float(eff.get("lr", args.lr)),
-        num_iter=int(eff.get("num_iter", args.iters)),
-        op_name=eff.get("op_name", args.op),
-        kernel_size=int(eff.get("kernel_size", args.kernel_size)),
-        kernel_sigma=float(eff.get("kernel_sigma", args.kernel_sigma)),
-        ds_factor=int(eff.get("ds_factor", args.ds_factor)),
-        ds_kernel=eff.get("ds_kernel", args.ds_kernel),
-        tv_weight=float(eff.get("tv_weight", args.tv)),
-        use_percep=bool(eff.get("use_percep", args.percep)),
-        percep_weight=float(eff.get("percep_weight", args.percep_w)),
-        seed=int(eff.get("seed", args.seed)),
-        show_every=int(eff.get("show_every", args.show_every)),
-        ema_decay=float(eff.get("ema_decay", args.ema)),
-        reg_noise_std=float(eff.get("reg_noise_std", args.reg_noise)),
-        upsample_mode=eff.get("upsample_mode", args.upsample),
-        amp=bool(eff.get("amp", args.amp)),
-        tile_size=int(eff.get("tile_size", args.tile_size)),
-        tile_overlap=int(eff.get("tile_overlap", args.tile_overlap)),
-        holdout_p=float(eff.get("holdout_p", args.holdout_p)),
-        early_patience=int(eff.get("early_patience", args.early_patience)),
-        motion_len=int(eff.get("motion_len", args.motion_len)),
-        motion_angle=float(eff.get("motion_angle", args.motion_angle)),
-        grid_nx=int(eff.get("grid_nx", args.grid_nx)),
-        grid_ny=int(eff.get("grid_ny", args.grid_ny)),
-        pw_mode=eff.get("pw_mode", args.pw_mode),
-        angle_min=float(eff.get("angle_min", args.angle_min)),
-        angle_max=float(eff.get("angle_max", args.angle_max)),
-        len_min=int(eff.get("len_min", args.len_min)),
-        len_max=int(eff.get("len_max", args.len_max)),
-        blend=bool(eff.get("blend", args.blend)),
-        blend_ratio=float(eff.get("blend_ratio", args.blend_ratio)),
-    )
+    # Gọi run_dip với từ điển tham số đã đầy đủ (không còn thiếu obspath)
+    run_dip(**run_kwargs)
 
 
 if __name__ == "__main__":

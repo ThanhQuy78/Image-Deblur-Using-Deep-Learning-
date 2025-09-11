@@ -16,7 +16,7 @@ Cách dùng:
 """
 
 import math
-from typing import Optional, Sequence, List, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -54,7 +54,7 @@ def motion_kernel(
 ) -> torch.Tensor:
     """Sinh hạt nhân mờ chuyển động tuyến tính (đường thẳng) với độ dài và góc cho trước.
 
-    Ghi chú: kernel được vẽ trên lưới vuông kích thước length x length.
+    Ghi chú: kernel được vẽ trên lưới vuông kích thước ~length x ~length (bảo đảm lẻ).
     """
     if length < 1:
         raise ValueError("motion_kernel: length phải >= 1")
@@ -65,7 +65,7 @@ def motion_kernel(
     theta = math.radians(angle_deg)
     dx = math.cos(theta)
     dy = math.sin(theta)
-    # Vẽ đường qua tâm theo góc theta
+    # Vẽ đường đi qua tâm theo góc theta
     num = 0
     for t in torch.linspace(-c, c, steps=ks, device=dev):
         x = c + t * dx
@@ -77,8 +77,7 @@ def motion_kernel(
             num += 1
     if num == 0:
         k[c, c] = 1.0
-        num = 1
-    k = k / k.sum()
+    k = k / (k.sum() + 1e-12)
     return k
 
 
@@ -94,7 +93,7 @@ class Blur(nn.Module):
         elif kernel.dim() == 4 and kernel.shape[0] == 1 and kernel.shape[1] == 1:
             k = kernel
         else:
-            raise ValueError("kernel phải có dạng (K,K) hoặc (1,1,K,K)")
+            raise ValueError("kernel phải là (K,K) hoặc (1,1,K,K)")
         k = k / (k.sum() + 1e-12)
         self.register_buffer("weight", k.repeat(channels, 1, 1, 1))  # Cx1xKxK
         pad_sz = k.shape[-1] // 2
@@ -154,21 +153,21 @@ class PiecewiseBlur(nn.Module):
         )
         self.ny, self.nx = ny, nx
         self.padding = padding
-        self.blend = bool(blend)
+        self.blend = blend
         self.blend_ratio = float(blend_ratio)
-        self.channels = int(channels)
+        self.channels = channels
 
-        # Lưu các toán tử Blur theo từng ô để tự động move device
-        rows: List[nn.ModuleList] = []
+        # Tạo module Blur cho từng ô (tự động move(device))
+        mod_rows = []
         for j in range(ny):
-            row_ops: List[nn.Module] = []
+            row = []
             for i in range(nx):
                 k = kernels[j][i]
                 if device is not None:
                     k = k.to(device)
-                row_ops.append(Blur(k, channels=channels, padding=padding))
-            rows.append(nn.ModuleList(row_ops))
-        self.ops = nn.ModuleList(rows)
+                row.append(Blur(k, channels=channels, padding=padding))
+            mod_rows.append(nn.ModuleList(row))
+        self.ops = nn.ModuleList(mod_rows)
 
     @staticmethod
     def _cosine_window(h: int, w: int, br: float, device, dtype):
@@ -192,7 +191,7 @@ class PiecewiseBlur(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, H, W = x.shape
         ny, nx = self.ny, self.nx
-        # Kích thước mỗi ô (chia gần đều)
+        # Chia gần đều theo H,W
         hh = [H // ny + (1 if y < H % ny else 0) for y in range(ny)]
         ww = [W // nx + (1 if x_ < W % nx else 0) for x_ in range(nx)]
         y0 = [0]
@@ -246,7 +245,6 @@ class Mask(nn.Module):
         self.register_buffer("mask", m)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Mở rộng (broadcast) mask cho khớp kênh nếu cần
         m = self.mask
         if m.shape[1] == 1 and x.shape[1] > 1:
             m = m.expand(-1, x.shape[1], -1, -1)
