@@ -13,30 +13,58 @@ Quy ước:
 - Thứ tự kênh: (C,H,W) cho numpy và (1,C,H,W) cho torch.
 """
 
+import numpy as np
 from PIL import Image
-import torchvision.utils as vutils
+import torch
 
 
-def load_img(path):
-    """Load mô hình từ tệp."""
-    return Image.open(path)
+def load_img(path: str) -> Image.Image:
+    """Nạp ảnh từ đường dẫn và chuẩn hoá về RGB."""
+    img = Image.open(path)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    return img
 
 
-def crop_image(img_pil, d=32):
-    """Cắt ảnh PIL sao cho kích thước là bội số của d."""
-    (w, h) = img_pil.size
-    w2 = w - (w % d)
-    h2 = h - (h % d)
-
-    bbox = [int((w - w2) / 2), int((h - h2) / 2), int((w + w2) / 2), int((h + h2) / 2)]
-
-    img_cropped = img_pil.crop(bbox)
-    return img_cropped
+def crop_image(img: Image.Image, mod: int = 32) -> Image.Image:
+    """Cắt ảnh để H,W chia hết cho mod (phù hợp mạng encoder-decoder)."""
+    w, h = img.size
+    w2 = (w // mod) * mod
+    h2 = (h // mod) * mod
+    if w2 == w and h2 == h:
+        return img
+    return img.crop((0, 0, w2, h2))
 
 
-def save_torch_img(img_var, path):
-    """Lưu tensor ảnh PyTorch thành tệp."""
-    vutils.save_image(img_var.clamp(0, 1), path)
+def pil_to_np(img: Image.Image) -> np.ndarray:
+    """PIL -> numpy float32 trong [0,1], shape (C,H,W)."""
+    arr = np.array(img, dtype=np.float32) / 255.0
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    # (H,W,C) -> (C,H,W)
+    arr = arr.transpose(2, 0, 1)
+    return arr
 
 
-# Gợi ý: nếu cần hỗ trợ ảnh RGBA/Grayscale, chuẩn hoá về RGB 3 kênh trước khi chuyển đổi.
+def np_to_torch(arr: np.ndarray) -> torch.Tensor:
+    """numpy (C,H,W) [0,1] -> torch (1,C,H,W) float32."""
+    if arr.ndim == 3:
+        t = torch.from_numpy(arr)[None, ...]
+    elif arr.ndim == 4 and arr.shape[0] == 1:
+        t = torch.from_numpy(arr)
+    else:
+        raise ValueError("np_to_torch: kỳ vọng (C,H,W) hoặc (1,C,H,W)")
+    return t.float()
+
+
+def save_torch_img(t: torch.Tensor, path: str) -> None:
+    """Lưu tensor (1,C,H,W) [0,1] về file ảnh."""
+    x = t.detach().cpu().clamp(0, 1)
+    if x.dim() == 4 and x.shape[0] == 1:
+        x = x[0]
+    if x.dim() != 3:
+        raise ValueError("save_torch_img: kỳ vọng tensor (1,C,H,W) hoặc (C,H,W)")
+    # (C,H,W) -> (H,W,C)
+    x = x.permute(1, 2, 0).numpy()
+    x = (x * 255.0 + 0.5).astype(np.uint8)
+    Image.fromarray(x).save(path)
