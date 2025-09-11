@@ -235,21 +235,31 @@ def build_operator(
                     row.append(motion_kernel(length=ln, angle_deg=ang, device=device))
                 kernels.append(row)
         else:  # random
-            g = torch.Generator(device=device)
+            # Khởi tạo generator theo device phù hợp
+            gen_device = "cuda" if getattr(device, "type", "cpu") == "cuda" else "cpu"
+            g = torch.Generator(device=gen_device)
             if hasattr(args, "seed"):
                 g.manual_seed(int(getattr(args, "seed")))
             for j in range(ny):
                 row = []
                 for i in range(nx):
+                    # Góc: uniform [angle_min, angle_max]
                     ang = float(
-                        torch.empty(1, generator=g)
-                        .uniform_(angle_min, angle_max)
-                        .item()
+                        (
+                            torch.rand(1, generator=g, device=device)
+                            * (angle_max - angle_min)
+                            + angle_min
+                        ).item()
                     )
+                    # Độ dài: randint [len_min, len_max]
                     ln = int(
-                        torch.empty(1, generator=g)
-                        .uniform_(len_min, len_max + 1)
-                        .item()
+                        torch.randint(
+                            low=len_min,
+                            high=len_max + 1,
+                            size=(1,),
+                            generator=g,
+                            device=device,
+                        ).item()
                     )
                     row.append(motion_kernel(length=ln, angle_deg=ang, device=device))
                 kernels.append(row)

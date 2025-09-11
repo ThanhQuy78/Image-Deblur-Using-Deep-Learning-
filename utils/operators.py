@@ -108,9 +108,8 @@ class Blur(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pad(x)
-        return F.conv2d(
-            x, self.weight, bias=None, stride=1, padding=0, groups=x.shape[1]
-        )
+        w = self.weight.to(dtype=x.dtype)
+        return F.conv2d(x, w, bias=None, stride=1, padding=0, groups=x.shape[1])
 
 
 class MotionBlur(Blur):
@@ -248,6 +247,7 @@ class Mask(nn.Module):
         m = self.mask
         if m.shape[1] == 1 and x.shape[1] > 1:
             m = m.expand(-1, x.shape[1], -1, -1)
+        m = m.to(dtype=x.dtype)
         return x * m
 
 
