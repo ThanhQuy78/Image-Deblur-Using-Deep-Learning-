@@ -1,21 +1,28 @@
 """dip_runner
 =============
 
-Runner tối ưu Deep Image Prior (DIP) end-to-end.
+Trình chạy tối ưu Deep Image Prior (DIP) end-to-end.
 - Hỗ trợ các mô hình trong models.get_net (skip/UNet/ResNet/dcgan).
 - Toán tử quan sát A: blur/downsample/mask/compose.
 - Regularization: TV và (tuỳ chọn) perceptual loss.
 - Theo dõi: PSNR (quan sát) và PSNR_gt (nếu có GT), EMA và backtracking đơn giản.
 
+Tích hợp cấu hình YAML:
+- Có thể nạp file YAML (--config) để lấy tham số mặc định.
+- Tham số CLI luôn ghi đè cấu hình YAML.
+- Có thể in/lưu "cấu hình hiệu dụng" (sau hợp nhất) với --print_config/--dump_config.
+
 Cách dùng (CLI ví dụ):
-  python dip_runner.py --obs blurred.png --out deblurred.png --op blur --kernel_size 21 --kernel_sigma 2.0 --iters 3000
+    python dip_runner.py --obs blurred.png --out deblurred.png --op blur --kernel_size 21 --kernel_sigma 2.0 --iters 3000
+    python dip_runner.py --config config/config.yaml --print_config
 """
 
 import argparse
 import os
+import json
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from models import get_net
 from utils.image_io import load_img, crop_image, pil_to_np, np_to_torch, save_torch_img
@@ -34,6 +41,158 @@ def tv_loss(x: torch.Tensor) -> torch.Tensor:
     dh = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs().mean()
     dw = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs().mean()
     return dh + dw
+
+
+# ====== Hỗ trợ cấu hình YAML và trích xuất cấu hình hiệu dụng ======
+def _read_yaml(path: str) -> Dict[str, Any]:
+    """Đọc file YAML an toàn. Nếu PyYAML không có, trả về {} và cảnh báo.
+
+    Trả về:
+        dict cấu hình (có thể lồng nhau) hoặc {} nếu lỗi.
+    """
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        print(f"[Cảnh báo] Không tìm thấy file cấu hình: {path}")
+        return {}
+    try:
+        import yaml  # type: ignore
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            print("[Cảnh báo] Cấu trúc YAML không hợp lệ (mong đợi mapping)")
+            return {}
+        return data
+    except Exception as e:  # pragma: no cover
+        print(f"[Cảnh báo] Không thể đọc YAML ({e}); quay về cấu hình rỗng.")
+        return {}
+
+
+def _get_nested(d: Dict[str, Any], keys: str, default: Any = None) -> Any:
+    """Lấy giá trị lồng nhau theo chuỗi khoá dạng 'a.b.c'."""
+    cur = d
+    for k in keys.split("."):
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def _build_run_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Trích xuất tham số gọi run_dip từ cấu hình YAML (nếu có)."""
+    kw: Dict[str, Any] = {}
+    # IO
+    kw["obspath"] = _get_nested(cfg, "io.obs")
+    gt_path = _get_nested(cfg, "io.gt")
+    kw["sharp_path"] = gt_path if gt_path else None
+    kw["save_path"] = _get_nested(cfg, "io.out")
+    # Model
+    kw["net_type"] = _get_nested(cfg, "model.type")
+    kw["input_depth"] = _get_nested(cfg, "model.input_depth")
+    kw["upsample_mode"] = _get_nested(cfg, "model.upsample_mode")
+    # Operator
+    kw["op_name"] = _get_nested(cfg, "operator.name")
+    kw["kernel_size"] = _get_nested(cfg, "operator.kernel_size")
+    kw["kernel_sigma"] = _get_nested(cfg, "operator.kernel_sigma")
+    kw["ds_factor"] = _get_nested(cfg, "operator.ds_factor")
+    kw["ds_kernel"] = _get_nested(cfg, "operator.ds_kernel")
+    # Optim
+    kw["lr"] = _get_nested(cfg, "optim.lr")
+    kw["num_iter"] = _get_nested(cfg, "optim.num_iter")
+    kw["show_every"] = _get_nested(cfg, "optim.show_every")
+    kw["ema_decay"] = _get_nested(cfg, "optim.ema")
+    kw["reg_noise_std"] = _get_nested(cfg, "optim.reg_noise_std")
+    # Loss
+    kw["tv_weight"] = _get_nested(cfg, "loss.tv_weight")
+    kw["use_percep"] = _get_nested(cfg, "loss.use_percep")
+    kw["percep_weight"] = _get_nested(cfg, "loss.percep_weight")
+    # Seed
+    kw["seed"] = _get_nested(cfg, "seed")
+    # Lọc None để không ghi đè mặc định của CLI khi thiếu trong YAML
+    return {k: v for k, v in kw.items() if v is not None}
+
+
+def _merge_cli_over_yaml(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, base: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Hợp nhất tham số YAML (base) với CLI (args). CLI luôn có quyền ưu tiên nếu khác mặc định.
+
+    Chiếu CLI -> tham số run_dip.
+    """
+    merged = dict(base)
+    # Bản đồ tên tham số CLI -> tên tham số run_dip
+    mapping = {
+        "obs": "obspath",
+        "gt": "sharp_path",
+        "out": "save_path",
+        "net": "net_type",
+        "input_depth": "input_depth",
+        "lr": "lr",
+        "iters": "num_iter",
+        "op": "op_name",
+        "kernel_size": "kernel_size",
+        "kernel_sigma": "kernel_sigma",
+        "ds_factor": "ds_factor",
+        "ds_kernel": "ds_kernel",
+        "tv": "tv_weight",
+        "percep": "use_percep",
+        "percep_w": "percep_weight",
+        "seed": "seed",
+        "show_every": "show_every",
+        "ema": "ema_decay",
+        "reg_noise": "reg_noise_std",
+        "upsample": "upsample_mode",
+    }
+
+    for cli_name, run_name in mapping.items():
+        cli_val = getattr(args, cli_name, None)
+        try:
+            default_val = parser.get_default(cli_name)
+        except Exception:
+            default_val = None
+        # Nếu người dùng truyền khác mặc định, coi như override
+        if cli_val != default_val:
+            merged[run_name] = cli_val if cli_name != "gt" else (cli_val or None)
+
+    return merged
+
+
+def _build_effective_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Tạo cấu hình hiệu dụng (phản ánh chính xác tham số run_dip sẽ dùng)."""
+    eff = {
+        "io": {
+            "obs": kwargs.get("obspath"),
+            "gt": kwargs.get("sharp_path"),
+            "out": kwargs.get("save_path"),
+        },
+        "model": {
+            "type": kwargs.get("net_type"),
+            "input_depth": kwargs.get("input_depth"),
+            "upsample_mode": kwargs.get("upsample_mode"),
+        },
+        "operator": {
+            "name": kwargs.get("op_name"),
+            "kernel_size": kwargs.get("kernel_size"),
+            "kernel_sigma": kwargs.get("kernel_sigma"),
+            "ds_factor": kwargs.get("ds_factor"),
+            "ds_kernel": kwargs.get("ds_kernel"),
+        },
+        "optim": {
+            "lr": kwargs.get("lr"),
+            "num_iter": kwargs.get("num_iter"),
+            "show_every": kwargs.get("show_every"),
+            "ema": kwargs.get("ema_decay"),
+            "reg_noise_std": kwargs.get("reg_noise_std"),
+        },
+        "loss": {
+            "tv_weight": kwargs.get("tv_weight"),
+            "use_percep": kwargs.get("use_percep"),
+            "percep_weight": kwargs.get("percep_weight"),
+        },
+        "seed": kwargs.get("seed"),
+    }
+    return eff
 
 
 def build_operator(
@@ -226,6 +385,24 @@ def run_dip(
 
 def main():
     p = argparse.ArgumentParser(description="Trình chạy Deep Image Prior (DIP)")
+    # Tuỳ chọn nạp và xuất cấu hình
+    p.add_argument(
+        "--config",
+        type=str,
+        default="",
+        help="Đường dẫn file YAML cấu hình để nạp (tuỳ chọn)",
+    )
+    p.add_argument(
+        "--print_config",
+        action="store_true",
+        help="In cấu hình hiệu dụng (sau khi hợp nhất YAML và CLI) rồi tiếp tục chạy",
+    )
+    p.add_argument(
+        "--dump_config",
+        type=str,
+        default="",
+        help="Lưu cấu hình hiệu dụng ra file (.yaml hoặc .json tuỳ đuôi)",
+    )
     p.add_argument(
         "--obs", type=str, default="blurred.png", help="Đường dẫn ảnh quan sát"
     )
@@ -266,28 +443,41 @@ def main():
     p.add_argument("--upsample", type=str, default="bilinear")
 
     args = p.parse_args()
-    run_dip(
-        obspath=args.obs,
-        sharp_path=args.gt if args.gt else None,
-        save_path=args.out,
-        net_type=args.net,
-        input_depth=args.input_depth,
-        lr=args.lr,
-        num_iter=args.iters,
-        op_name=args.op,
-        kernel_size=args.kernel_size,
-        kernel_sigma=args.kernel_sigma,
-        ds_factor=args.ds_factor,
-        ds_kernel=args.ds_kernel,
-        tv_weight=args.tv,
-        use_percep=args.percep,
-        percep_weight=args.percep_w,
-        seed=args.seed,
-        show_every=args.show_every,
-        ema_decay=args.ema,
-        reg_noise_std=args.reg_noise,
-        upsample_mode=args.upsample,
-    )
+
+    # 1) Đọc YAML (nếu có) và trích xuất tham số cho run_dip
+    yaml_cfg = _read_yaml(args.config) if args.config else {}
+    base_kwargs = _build_run_kwargs_from_cfg(yaml_cfg)
+    # 2) Hợp nhất với CLI (CLI có quyền ưu tiên nếu khác mặc định)
+    run_kwargs = _merge_cli_over_yaml(p, args, base_kwargs)
+
+    # 3) Trích xuất và in/lưu cấu hình hiệu dụng theo yêu cầu
+    eff_cfg = _build_effective_config(run_kwargs)
+    if args.print_config:
+        print("===== Cấu hình hiệu dụng (sau hợp nhất) =====")
+        try:
+            import yaml  # type: ignore
+
+            print(yaml.safe_dump(eff_cfg, sort_keys=False, allow_unicode=True))
+        except Exception:
+            print(json.dumps(eff_cfg, indent=2, ensure_ascii=False))
+
+    if args.dump_config:
+        out_path = args.dump_config
+        try:
+            if out_path.lower().endswith((".yml", ".yaml")):
+                import yaml  # type: ignore
+
+                with open(out_path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(eff_cfg, f, sort_keys=False, allow_unicode=True)
+            else:
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(eff_cfg, f, indent=2, ensure_ascii=False)
+            print(f"Đã lưu cấu hình hiệu dụng: {out_path}")
+        except Exception as e:
+            print(f"[Cảnh báo] Không thể lưu cấu hình hiệu dụng: {e}")
+
+    # 4) Chạy DIP với tham số đã hợp nhất
+    run_dip(**run_kwargs)
 
 
 if __name__ == "__main__":

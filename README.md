@@ -11,7 +11,8 @@ Khoá luận/đồ án minh hoạ khử mờ ảnh bằng Deep Image Prior (DIP)
 - Trình chạy DIP (dip_runner.py):
   - MSE + TV + (tuỳ chọn) Perceptual Loss.
   - EMA đầu ra, backtracking đơn giản, ghi log PSNR.
-  - CLI tiện dụng cho các kịch bản phổ biến.
+  - CLI tiện dụng cho các kịch bản phổ biến, hỗ trợ cấu hình YAML.
+  - Nạp YAML (--config), CLI ghi đè cấu hình, in/lưu "cấu hình hiệu dụng" (--print_config/--dump_config).
 - Notebook deblur_full.ipynb: quy trình toàn diện từ thiết lập, tối ưu, đánh giá, suy luận tới xuất mô hình và benchmark.
 - Cấu hình YAML (config.yaml): tham số hoá IO, model, operator, optim, loss, eval, export.
 
@@ -29,6 +30,7 @@ Khoá luận/đồ án minh hoạ khử mờ ảnh bằng Deep Image Prior (DIP)
 - Python >= 3.8
 - PyTorch phù hợp với hệ thống (CUDA/CPU)
 - Thư viện phụ trợ: pillow, numpy, scipy (nếu SSIM), v.v.
+  - PyYAML (tuỳ chọn) để đọc/ghi YAML; nếu thiếu sẽ tự động in/lưu JSON.
 
 Cài đặt nhanh (gợi ý):
 ```bash
@@ -56,6 +58,23 @@ python dip_runner.py --obs blurred.png --gt sharp.png --out outputs/deblurred.pn
 python dip_runner.py --obs blurred.png --out outputs/restore.png --op downsample --ds_factor 2 --iters 2000
 ```
 
+### Cấu hình YAML & hợp nhất với CLI
+- Có thể chuẩn bị cấu hình tại `config/config.yaml`.
+- Nạp YAML bằng `--config`; mọi tham số truyền qua CLI sẽ luôn ghi đè giá trị trong YAML.
+- Có thể in/lưu "cấu hình hiệu dụng" (sau khi hợp nhất) để tái lập thí nghiệm.
+
+Ví dụ:
+```bash
+# In cấu hình hiệu dụng rồi chạy
+python dip_runner.py --config config/config.yaml --print_config --obs my_blur.png --iters 2000
+
+# Lưu cấu hình hiệu dụng ra YAML
+python dip_runner.py --config config/config.yaml --dump_config outputs/effective.yaml
+
+# Nếu không cài PyYAML, chương trình sẽ tự động lưu ở định dạng JSON
+python dip_runner.py --config config/config.yaml --dump_config outputs/effective.json
+```
+
 Các tuỳ chọn CLI chính:
 - --net: skip | UNet | ResNet | dcgan
 - --op: identity | blur | downsample | blur_downsample | mask
@@ -77,6 +96,13 @@ Các nhóm tham số chính:
 - optim: lr, num_iter, reg_noise_std, ema, show_every.
 - loss: mse_weight, tv_weight, use_percep, percep_weight.
 - eval, export: báo cáo và xuất mô hình.
+  
+Ghi chú:
+- Khi dùng `--config`, các khoá liên quan trực tiếp tới runner sẽ được đọc: 
+  - io.obs, io.gt, io.out; model.type, model.input_depth, model.upsample_mode;
+  - operator.name/kernel_size/kernel_sigma/ds_factor/ds_kernel;
+  - optim.lr/num_iter/show_every/ema/reg_noise_std; loss.tv_weight/use_percep/percep_weight; seed.
+- Tham số qua CLI (ví dụ `--iters`, `--op`, `--percep_w`...) luôn ghi đè cấu hình YAML.
 
 ## Mô hình hỗ trợ
 - skip: encoder-decoder nhiều scale với skip connections, dễ tuỳ biến số kênh qua các scale.
